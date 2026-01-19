@@ -22,22 +22,21 @@ DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 STUDENTS_FILE = DATA_DIR / "students.json"
 ADMIN_FILE = DATA_DIR / "admin.json"
-PAYMENT_FILE = DATA_DIR / "payments.json"
 INSTRUCTIONS_FILE = DATA_DIR / "instructions.json"
 UPLOADS_DIR = DATA_DIR / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
 
-# Initialize data files
+# Initialize data files with improved structure
 def init_files():
     default_data = {
         "students": [],
         "admin": {
             "username": "admin",
-            "password": "admin123",  # Will be hashed
+            "password": "admin123",
             "payment_amount": 5000,
             "payment_accounts": [{"bank": "Bank Name", "account": "1234567890", "name": "Account Holder"}],
             "short_url_code": str(uuid.uuid4())[:8],
-            "base_url": "http://localhost:8501",
+            "base_url": "https://payment-collection-form.streamlit.app",
             "instructions": "Default instructions for students.",
             "additional_instructions": "Please make payment to the given account and upload screenshot.",
             "form_published": True,
@@ -54,13 +53,17 @@ def init_files():
                 "allow_download": True,
                 "allow_delete": True,
                 "max_file_size_mb": 5
+            },
+            "security_settings": {
+                "allow_future_dates": False,
+                "require_screenshot_for_paid": True,
+                "soft_delete_enabled": False
             }
         },
-        "payments": [],
         "instructions": "Default instructions will appear here."
     }
     
-    # Initialize students.json
+    # Initialize students.json with improved structure
     if not STUDENTS_FILE.exists():
         with open(STUDENTS_FILE, 'w') as f:
             json.dump(default_data["students"], f, indent=2)
@@ -71,11 +74,6 @@ def init_files():
         admin_data["password"] = hash_password(admin_data["password"])
         with open(ADMIN_FILE, 'w') as f:
             json.dump(admin_data, f, indent=2)
-    
-    # Initialize payments.json
-    if not PAYMENT_FILE.exists():
-        with open(PAYMENT_FILE, 'w') as f:
-            json.dump(default_data["payments"], f, indent=2)
     
     # Initialize instructions.json
     if not INSTRUCTIONS_FILE.exists():
@@ -138,9 +136,19 @@ def format_datetime(dt_string):
     except:
         return dt_string
 
+def format_date_only(dt_string):
+    """Format date only"""
+    try:
+        if not dt_string:
+            return "Not specified"
+        dt = datetime.fromisoformat(dt_string)
+        return dt.strftime("%d-%m-%Y")
+    except:
+        return dt_string
+
 # Admin authentication
 def authenticate(username, password):
-    admin_data = load_data(ADMIN_FILE, {})
+    admin_data = get_admin_data()
     if admin_data.get("username") == username:
         if admin_data.get("password") == hash_password(password):
             return True
@@ -173,19 +181,32 @@ def update_screenshot_settings(settings):
     admin_data["screenshot_settings"] = settings
     update_admin_data(admin_data)
 
+def get_security_settings():
+    admin_data = get_admin_data()
+    return admin_data.get("security_settings", {
+        "allow_future_dates": False,
+        "require_screenshot_for_paid": True,
+        "soft_delete_enabled": False
+    })
+
 def get_short_url():
     admin_data = get_admin_data()
-    base_url = admin_data.get("base_url", "http://localhost:8501")
+    base_url = admin_data.get("base_url", "https://payment-collection-form.streamlit.app")
     short_url_code = admin_data.get("short_url_code", "")
+    # Ensure no trailing slash
+    base_url = base_url.rstrip('/')
     return f"{base_url}/?student={short_url_code}"
 
 def get_base_url():
     admin_data = get_admin_data()
-    return admin_data.get("base_url", "http://localhost:8501")
+    base_url = admin_data.get("base_url", "https://payment-collection-form.streamlit.app")
+    # Remove trailing slash for consistency
+    return base_url.rstrip('/')
 
 def update_base_url(base_url):
     admin_data = get_admin_data()
-    admin_data["base_url"] = base_url
+    # Remove trailing slash before saving
+    admin_data["base_url"] = base_url.rstrip('/')
     update_admin_data(admin_data)
 
 def is_form_published():
@@ -234,6 +255,59 @@ def update_additional_instructions(instructions):
     admin_data["additional_instructions"] = instructions
     update_admin_data(admin_data)
 
+# Student deletion function with improved structure
+def delete_student_by_id(student_id):
+    """Delete a student and all associated data"""
+    students = get_students()
+    
+    # Find student
+    student_to_delete = None
+    for student in students:
+        if student.get("id") == student_id:
+            student_to_delete = student
+            break
+    
+    if not student_to_delete:
+        return False
+    
+    # Check if soft delete is enabled
+    security_settings = get_security_settings()
+    if security_settings.get("soft_delete_enabled", False):
+        # Soft delete - mark as deleted but keep data
+        for student in students:
+            if student.get("id") == student_id:
+                student["deleted"] = True
+                student["deleted_date"] = datetime.now().isoformat()
+                break
+        save_students(students)
+        return True
+    
+    # Hard delete - remove completely
+    # Delete student's screenshot files
+    if student_to_delete.get("payments"):
+        for payment in student_to_delete["payments"]:
+            if payment.get("screenshot"):
+                delete_screenshot_file(payment.get("screenshot"))
+    
+    # Remove student from students list
+    updated_students = [s for s in students if s.get("id") != student_id]
+    save_students(updated_students)
+    
+    return True
+
+def delete_multiple_students(student_ids):
+    """Delete multiple students and their associated data"""
+    success_count = 0
+    fail_count = 0
+    
+    for student_id in student_ids:
+        if delete_student_by_id(student_id):
+            success_count += 1
+        else:
+            fail_count += 1
+    
+    return success_count, fail_count
+
 # Screenshot management
 def delete_screenshot_file(filename):
     """Delete screenshot file from server"""
@@ -247,66 +321,17 @@ def delete_screenshot_file(filename):
         st.error(f"Error deleting screenshot: {e}")
     return False
 
-def remove_screenshot_from_payment(payment_id):
-    """Remove screenshot reference from payment record"""
-    payments = get_payments()
-    for payment in payments:
-        if payment.get("id") == payment_id:
-            payment["screenshot"] = None
-            payment["screenshot_deleted"] = True
-            payment["screenshot_deleted_date"] = datetime.now().isoformat()
-            break
-    save_payments(payments)
-
-def remove_screenshot_from_student(student_id):
+def remove_screenshot_from_student(student_id, payment_index=0):
     """Remove screenshot reference from student record"""
     students = get_students()
     for student in students:
         if student.get("id") == student_id:
-            student["screenshot_deleted"] = True
+            if "payments" in student and len(student["payments"]) > payment_index:
+                student["payments"][payment_index]["screenshot"] = None
+                student["payments"][payment_index]["screenshot_deleted"] = True
+                student["payments"][payment_index]["screenshot_deleted_date"] = datetime.now().isoformat()
             break
     save_students(students)
-
-def view_screenshot(filename):
-    """View screenshot in modal"""
-    if filename:
-        file_path = UPLOADS_DIR / filename
-        if file_path.exists():
-            with open(file_path, "rb") as f:
-                img_bytes = f.read()
-            return img_bytes
-    return None
-
-# Student management
-def get_students():
-    return load_data(STUDENTS_FILE, [])
-
-def save_students(students):
-    save_data(STUDENTS_FILE, students)
-
-def get_payments():
-    return load_data(PAYMENT_FILE, [])
-
-def save_payments(payments):
-    save_data(PAYMENT_FILE, payments)
-
-def get_student_by_id(student_id):
-    students = get_students()
-    for student in students:
-        if student.get("id") == student_id:
-            return student
-    return None
-
-def get_student_by_roll(roll_number):
-    students = get_students()
-    for student in students:
-        if student.get("roll_number") == roll_number:
-            return student
-    return None
-
-def get_student_payments(student_id):
-    payments = get_payments()
-    return [p for p in payments if p.get("student_id") == student_id]
 
 def save_uploaded_file(uploaded_file, student_id):
     screenshot_settings = get_screenshot_settings()
@@ -325,28 +350,106 @@ def save_uploaded_file(uploaded_file, student_id):
     
     return filename
 
+# Student management with improved structure
+def get_students():
+    """Get all active students (filter out soft deleted if enabled)"""
+    students = load_data(STUDENTS_FILE, [])
+    security_settings = get_security_settings()
+    
+    if security_settings.get("soft_delete_enabled", False):
+        # Filter out soft deleted students
+        return [s for s in students if not s.get("deleted", False)]
+    
+    return students
+
+def get_all_students():
+    """Get all students including deleted ones"""
+    return load_data(STUDENTS_FILE, [])
+
+def save_students(students):
+    save_data(STUDENTS_FILE, students)
+
+def get_student_by_id(student_id):
+    students = get_students()
+    for student in students:
+        if student.get("id") == student_id:
+            return student
+    return None
+
+def get_student_by_roll(roll_number):
+    students = get_students()
+    for student in students:
+        if student.get("roll_number") == roll_number:
+            return student
+    return None
+
 def get_instructions():
     return load_data(INSTRUCTIONS_FILE, "")
 
 def save_instructions(instructions):
     save_data(INSTRUCTIONS_FILE, instructions)
 
+# Time validation functions
+def validate_future_date(date_input, time_input=None, allow_future=False):
+    """Validate that date/time is not in the future"""
+    current_time = datetime.now()
+    
+    if time_input:
+        # Combine date and time
+        input_datetime = datetime.combine(date_input, time_input)
+    else:
+        # Just date
+        input_datetime = datetime.combine(date_input, datetime.min.time())
+    
+    if not allow_future and input_datetime > current_time:
+        return False, "Future dates are not allowed"
+    
+    return True, ""
+
+def validate_time_components(hour, minute, am_pm):
+    """Validate time components"""
+    if hour < 1 or hour > 12:
+        return False, "Hour must be between 1 and 12"
+    
+    if minute < 0 or minute > 59:
+        return False, "Minute must be between 0 and 59"
+    
+    if am_pm not in ["AM", "PM"]:
+        return False, "AM/PM must be either AM or PM"
+    
+    return True, ""
+
 # Main app
 def main():
     init_files()
     
-    # Check if student panel should be shown using backward compatible method
+    # Check if student panel should be shown
     query_params = get_query_params()
+    
+    # DEBUG: Show query params (set to False in production)
+    DEBUG_MODE = False
+    if DEBUG_MODE:
+        st.sidebar.write("🔍 DEBUG INFO")
+        st.sidebar.write("Query Params:", query_params)
+        admin_data = get_admin_data()
+        st.sidebar.write("Admin Code:", admin_data.get("short_url_code"))
+        st.sidebar.write("Base URL:", get_base_url())
     
     if "student" in query_params:
         student_code = query_params["student"]
         admin_data = get_admin_data()
+        
+        if DEBUG_MODE:
+            st.sidebar.write("Student Code from URL:", student_code)
+            st.sidebar.write("Code Match:", student_code == admin_data.get("short_url_code"))
+        
         if student_code == admin_data.get("short_url_code"):
             show_student_panel()
             return
         else:
-            st.error("Invalid student portal URL")
-            return
+            st.error("❌ Invalid student portal URL")
+            # Show login option even if URL is invalid
+            pass
     
     # Show login/register page
     if "logged_in" not in st.session_state:
@@ -461,7 +564,7 @@ def show_unpublished_message():
         unsafe_allow_html=True
     )
     
-    # Display contact information without HTML formatting to prevent copy option
+    # Display contact information
     st.markdown("---")
     st.markdown("### Contact Information")
     st.markdown("If you have urgent queries, please contact:")
@@ -493,7 +596,7 @@ def show_account_details_section(payment_accounts, payment_amount, admin_data):
                 st.divider()
         
         # Payment amount
-        st.warning(f"**IMPORTANT:** Payment amount is fixed at PKR{payment_amount}")
+        st.warning(f"**IMPORTANT:** Payment amount is fixed at PKR {payment_amount}")
         
         # Additional instructions
         additional_instructions = get_additional_instructions()
@@ -507,7 +610,7 @@ def show_submit_payment_section(payment_amount, payment_accounts, screenshot_set
     st.header("Submit Payment Details")
     
     # Display payment amount reminder
-    st.warning(f"Payment Amount: PKR{payment_amount} (fixed)")
+    st.warning(f"Payment Amount: PKR {payment_amount} (fixed)")
     
     max_file_size = screenshot_settings.get("max_file_size_mb", 5)
     
@@ -563,7 +666,7 @@ def show_submit_payment_section(payment_amount, payment_accounts, screenshot_set
                         # Auto-set payment datetime to current time
                         payment_datetime = datetime.now()
                         
-                        # Create student record
+                        # Create student record with improved structure
                         student_id = str(uuid.uuid4())
                         student_data = {
                             "id": student_id,
@@ -574,37 +677,30 @@ def show_submit_payment_section(payment_amount, payment_accounts, screenshot_set
                             "registration_date": datetime.now().isoformat(),
                             "student_remarks": remarks,
                             "added_by_admin": False,
-                            "payment_account_used": payment_account,
-                            "payment_datetime": payment_datetime.isoformat(),  # Auto-set timestamp
-                            "auto_timestamp": True,  # Flag to indicate auto-generated timestamp
-                            "screenshot_deleted": False
-                        }
-                        
-                        # Save payment record
-                        filename = save_uploaded_file(payment_screenshot, student_id)
-                        payment_data = {
-                            "id": str(uuid.uuid4()),
-                            "student_id": student_id,
-                            "transaction_id": transaction_id,
-                            "amount": payment_amount,
-                            "screenshot": filename,
-                            "screenshot_deleted": False,
-                            "status": "Pending",
-                            "submission_date": datetime.now().isoformat(),
-                            "payment_datetime": payment_datetime.isoformat(),  # Auto-set timestamp
-                            "student_remarks": remarks,
-                            "payment_account": payment_account,
-                            "added_by_admin": False,
-                            "auto_timestamp": True  # Flag to indicate auto-generated timestamp
+                            "payment_datetime": payment_datetime.isoformat(),
+                            "auto_timestamp": True,
+                            "payments": [
+                                {
+                                    "id": str(uuid.uuid4()),
+                                    "transaction_id": transaction_id,
+                                    "amount": payment_amount,
+                                    "screenshot": save_uploaded_file(payment_screenshot, student_id),
+                                    "screenshot_deleted": False,
+                                    "status": "Pending",
+                                    "submission_date": datetime.now().isoformat(),
+                                    "payment_datetime": payment_datetime.isoformat(),
+                                    "student_remarks": remarks,
+                                    "payment_account": payment_account,
+                                    "added_by_admin": False,
+                                    "auto_timestamp": True,
+                                    "verified_by_admin": False
+                                }
+                            ]
                         }
                         
                         # Save data
                         students.append(student_data)
                         save_students(students)
-                        
-                        payments = get_payments()
-                        payments.append(payment_data)
-                        save_payments(payments)
                         
                         st.success("Payment submitted successfully! Your payment is under review.")
                         st.info(f"Submission timestamp: {formatted_time}")
@@ -634,76 +730,77 @@ def show_payment_status_section():
                           unsafe_allow_html=True)
             
             # Show payment account used
-            if student.get("payment_account_used"):
-                st.info(f"**Payment Account Used:** {student.get('payment_account_used')}")
+            if student.get("payments") and len(student["payments"]) > 0:
+                payment_account = student["payments"][0].get("payment_account", "")
+                if payment_account:
+                    st.info(f"**Payment Account Used:** {payment_account}")
             
             # Show payment date and time
             if student.get("payment_datetime"):
                 formatted_datetime = format_datetime(student.get("payment_datetime"))
-                # Check if timestamp was auto-generated
                 if student.get("auto_timestamp"):
                     st.info(f"**Payment Submission Timestamp:** {formatted_datetime} (Auto-recorded)")
                 else:
                     st.info(f"**Payment Date & Time:** {formatted_datetime}")
             
-            # Check if screenshot was deleted
-            if student.get("screenshot_deleted"):
-                st.warning("⚠️ Payment screenshot has been deleted by admin")
+            # Show payment history in list format
+            if student.get("payments"):
+                st.subheader("Payment History")
+                for payment in student["payments"]:
+                    payment_date = format_datetime(payment.get("payment_datetime", payment.get("submission_date")))
+                    
+                    # Create a container for each payment
+                    with st.container():
+                        col1, col2, col3, col4 = st.columns([3, 2, 2, 3])
+                        
+                        with col1:
+                            st.write(f"**Transaction ID:** {payment.get('transaction_id')}")
+                            st.write(f"**Amount:** PKR {payment.get('amount')}")
+                        
+                        with col2:
+                            st.write(f"**Status:** {payment.get('status')}")
+                            st.write(f"**Date:** {format_date_only(payment.get('payment_datetime'))}")
+                        
+                        with col3:
+                            st.write(f"**Time:** {datetime.fromisoformat(payment.get('payment_datetime')).strftime('%I:%M %p') if payment.get('payment_datetime') else 'N/A'}")
+                            st.write(f"**Account:** {payment.get('payment_account', 'N/A')[:20]}...")
+                        
+                        with col4:
+                            # Screenshot section
+                            if payment.get("screenshot_deleted"):
+                                st.warning("📸 Screenshot deleted")
+                            elif payment.get("screenshot"):
+                                screenshot_settings = get_screenshot_settings()
+                                if screenshot_settings.get("allow_download", True):
+                                    screenshot_path = UPLOADS_DIR / payment.get("screenshot")
+                                    if screenshot_path.exists():
+                                        with open(screenshot_path, "rb") as f:
+                                            img_bytes = f.read()
+                                        
+                                        # View button
+                                        if st.button("👁️ View", key=f"view_{payment['id']}"):
+                                            st.image(img_bytes, caption="Payment Screenshot", use_column_width=True)
+                                        
+                                        # Download button
+                                        st.download_button(
+                                            "📥 Download",
+                                            img_bytes,
+                                            file_name=payment.get("screenshot"),
+                                            key=f"download_{payment['id']}"
+                                        )
+                                    else:
+                                        st.warning("⚠️ File not found")
+                                else:
+                                    st.info("📸 Screenshot available")
+                            else:
+                                st.info("No screenshot")
+                        
+                        st.divider()
+            else:
+                st.info("No payment history available")
             
             if student.get("admin_remarks"):
                 st.info(f"**Admin Remarks:** {student.get('admin_remarks')}")
-            
-            # Show payment history
-            payments = get_student_payments(student.get("id"))
-            if payments:
-                st.subheader("Payment History")
-                for payment in payments:
-                    payment_date = format_datetime(payment.get("payment_datetime", payment.get("submission_date")))
-                    with st.expander(f"Payment on {payment_date}"):
-                        cols = st.columns(4)
-                        cols[0].write(f"**Transaction ID:** {payment.get('transaction_id')}")
-                        cols[1].write(f"**Amount:** PKR{payment.get('amount')}")
-                        cols[2].write(f"**Status:** {payment.get('status')}")
-                        cols[3].write(f"**Account:** {payment.get('payment_account', 'Not specified')}")
-                        
-                        # Show payment date and time
-                        if payment.get("payment_datetime"):
-                            formatted_datetime = format_datetime(payment.get("payment_datetime"))
-                            if payment.get("auto_timestamp"):
-                                st.write(f"**Submission Timestamp:** {formatted_datetime} (Auto-recorded)")
-                            else:
-                                st.write(f"**Payment Date & Time:** {formatted_datetime}")
-                        
-                        # Show submission date
-                        submission_date = format_datetime(payment.get("submission_date"))
-                        st.write(f"**Form Submission Date:** {submission_date}")
-                        
-                        # Check if screenshot exists or was deleted
-                        if payment.get("screenshot_deleted"):
-                            st.warning("📸 Screenshot has been deleted")
-                        elif payment.get("screenshot"):
-                            screenshot_settings = get_screenshot_settings()
-                            if screenshot_settings.get("allow_download", True):
-                                screenshot_path = UPLOADS_DIR / payment.get("screenshot")
-                                if screenshot_path.exists():
-                                    with open(screenshot_path, "rb") as f:
-                                        img_bytes = f.read()
-                                    st.download_button(
-                                        "📥 Download Screenshot",
-                                        img_bytes,
-                                        file_name=payment.get("screenshot"),
-                                        key=f"student_download_{payment['id']}",
-                                        help="Download the payment screenshot"
-                                    )
-                                else:
-                                    st.warning("⚠️ Screenshot file not found on server")
-                            else:
-                                st.info("📸 Screenshot is available (download disabled by admin)")
-                        else:
-                            st.info("📸 No screenshot uploaded")
-                        
-                        if payment.get("student_remarks"):
-                            st.write(f"**Your Remarks:** {payment.get('student_remarks')}")
         else:
             st.warning("No record found for this roll number")
 
@@ -726,9 +823,8 @@ def show_student_list_section():
                         "Name": s["name"], 
                         "Roll Number": s["roll_number"],
                         "Status": "Paid",
-                        "Account Used": s.get("payment_account_used", "Not specified"),
-                        "Payment Date": format_datetime(s.get("payment_datetime", "")),
-                        "Registration Date": format_datetime(s.get("registration_date", ""))
+                        "Payment Date": format_date_only(s.get("payment_datetime", "")),
+                        "Registration Date": format_date_only(s.get("registration_date", ""))
                     } 
                     for s in paid_students
                 ])
@@ -744,9 +840,8 @@ def show_student_list_section():
                         "Name": s["name"], 
                         "Roll Number": s["roll_number"],
                         "Status": s.get("payment_status", "Pending"),
-                        "Account Used": s.get("payment_account_used", "Not specified"),
-                        "Payment Date": format_datetime(s.get("payment_datetime", "")),
-                        "Registration Date": format_datetime(s.get("registration_date", ""))
+                        "Payment Date": format_date_only(s.get("payment_datetime", "")),
+                        "Registration Date": format_date_only(s.get("registration_date", ""))
                     } 
                     for s in unpaid_students
                 ])
@@ -778,6 +873,12 @@ def show_admin_panel():
         st.session_state.logged_in = False
         st.rerun()
     
+    # Student portal link
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Student Portal")
+    short_url = get_short_url()
+    st.sidebar.info(f"Student URL: \n{short_url}")
+    
     if page == "Dashboard":
         show_admin_dashboard()
     elif page == "Student Management":
@@ -796,7 +897,6 @@ def show_admin_dashboard():
     
     # Statistics
     students = get_students()
-    payments = get_payments()
     admin_data = get_admin_data()
     payment_accounts = get_payment_accounts()
     form_published = is_form_published()
@@ -848,22 +948,18 @@ def show_admin_dashboard():
         - Enabled student features are available
         """)
     
-    # Short URL
+    # Short URL display without copy button
     st.divider()
     st.subheader("Student Portal URL")
     
     short_url = get_short_url()
     base_url = get_base_url()
     
-    col1, col2, col3 = st.columns([3, 1, 1])
+    col1, col2 = st.columns([4, 1])
     with col1:
         st.code(short_url)
     with col2:
-        if st.button("📋 Copy URL", type="secondary", use_container_width=True):
-            st.toast("URL copied to clipboard!", icon="✅")
-    with col3:
-        if st.button("🔗 Test URL", type="primary", use_container_width=True):
-            st.toast(f"Testing URL: {short_url}", icon="🔗")
+        st.markdown(f'<a href="{short_url}" target="_blank"><button style="background-color: #4CAF50; color: white; padding: 10px; border: none; border-radius: 5px; cursor: pointer; width: 100%;">🔗 Open Portal</button></a>', unsafe_allow_html=True)
     
     st.info(f"**Base URL:** {base_url}")
     
@@ -882,8 +978,6 @@ def show_admin_dashboard():
             st.warning("No tabs are enabled for students")
     else:
         st.warning("Students can only see: 'Payment Form Currently Unavailable' message")
-    
-    st.caption("Share this URL with students to access the payment portal")
     
     # Current payment accounts
     st.divider()
@@ -918,22 +1012,30 @@ def show_admin_dashboard():
     st.divider()
     st.subheader("Recent Payment Submissions")
     
-    if payments:
-        # Sort by payment datetime if available, otherwise by submission date
-        recent_payments = sorted(
-            payments, 
-            key=lambda x: x.get("payment_datetime", x.get("submission_date", "")), 
-            reverse=True
-        )[:10]
+    if students:
+        # Get all payments from all students
+        all_payments = []
+        for student in students:
+            if student.get("payments"):
+                for payment in student["payments"]:
+                    payment["student_name"] = student.get("name")
+                    payment["student_roll"] = student.get("roll_number")
+                    all_payments.append(payment)
         
-        for payment in recent_payments:
-            student = get_student_by_id(payment.get("student_id"))
-            if student:
+        if all_payments:
+            # Sort by payment datetime if available, otherwise by submission date
+            recent_payments = sorted(
+                all_payments, 
+                key=lambda x: x.get("payment_datetime", x.get("submission_date", "")), 
+                reverse=True
+            )[:10]
+            
+            for payment in recent_payments:
                 payment_date = format_datetime(payment.get("payment_datetime", payment.get("submission_date")))
-                with st.expander(f"{student.get('name')} - {payment_date}"):
+                with st.expander(f"{payment.get('student_name')} - {payment_date}"):
                     cols = st.columns(4)
-                    cols[0].write(f"**Roll:** {student.get('roll_number')}")
-                    cols[1].write(f"**Amount:** PKR{payment.get('amount')}")
+                    cols[0].write(f"**Roll:** {payment.get('student_roll')}")
+                    cols[1].write(f"**Amount:** PKR {payment.get('amount')}")
                     cols[2].write(f"**Status:** {payment.get('status')}")
                     cols[3].write(f"**Txn ID:** {payment.get('transaction_id')}")
                     
@@ -961,110 +1063,15 @@ def show_admin_dashboard():
                         st.write("**Timestamp Type:** Auto-generated (Student submission)")
                     else:
                         st.write("**Timestamp Type:** Manually set by Admin")
-                    
-                    # Screenshot management section
-                    st.divider()
-                    st.subheader("Screenshot Management")
-                    
-                    col1, col2, col3, col4 = st.columns(4)
-                    
-                    with col1:
-                        # View screenshot button
-                        if payment.get("screenshot") and not payment.get("screenshot_deleted"):
-                            screenshot_path = UPLOADS_DIR / payment.get("screenshot")
-                            if screenshot_path.exists():
-                                with open(screenshot_path, "rb") as f:
-                                    img_bytes = f.read()
-                                
-                                # Display image in a modal or directly
-                                if st.button("👁️ View", key=f"view_{payment['id']}", use_container_width=True):
-                                    st.image(img_bytes, caption="Payment Screenshot", use_column_width=True)
-                            else:
-                                st.warning("File not found")
-                        elif payment.get("screenshot_deleted"):
-                            st.warning("❌ Deleted")
-                        else:
-                            st.info("No screenshot")
-                    
-                    with col2:
-                        # Download screenshot button
-                        if payment.get("screenshot") and not payment.get("screenshot_deleted"):
-                            screenshot_path = UPLOADS_DIR / payment.get("screenshot")
-                            if screenshot_path.exists():
-                                with open(screenshot_path, "rb") as f:
-                                    img_bytes = f.read()
-                                
-                                if screenshot_settings.get("allow_download", True):
-                                    st.download_button(
-                                        "📥 Download",
-                                        img_bytes,
-                                        file_name=payment.get("screenshot"),
-                                        key=f"download_{payment['id']}",
-                                        use_container_width=True
-                                    )
-                                else:
-                                    st.warning("Download disabled")
-                            else:
-                                st.warning("File not found")
-                        elif payment.get("screenshot_deleted"):
-                            st.warning("❌ Deleted")
-                        else:
-                            st.info("No screenshot")
-                    
-                    with col3:
-                        # Delete screenshot button
-                        if payment.get("screenshot") and not payment.get("screenshot_deleted"):
-                            if screenshot_settings.get("allow_delete", True):
-                                if st.button("🗑️ Delete", key=f"delete_{payment['id']}", type="secondary", use_container_width=True):
-                                    if delete_screenshot_file(payment.get("screenshot")):
-                                        remove_screenshot_from_payment(payment.get("id"))
-                                        remove_screenshot_from_student(payment.get("student_id"))
-                                        st.success("Screenshot deleted successfully!")
-                                        st.rerun()
-                                    else:
-                                        st.error("Failed to delete screenshot")
-                            else:
-                                st.warning("Delete disabled")
-                        elif payment.get("screenshot_deleted"):
-                            st.info("Already deleted")
-                        else:
-                            st.info("No screenshot")
-                    
-                    with col4:
-                        # Quick actions for payment status
-                        col_status1, col_status2 = st.columns(2)
-                        with col_status1:
-                            if payment.get("status") != "Paid":
-                                if st.button("✅ Approve", key=f"approve_{payment['id']}", use_container_width=True):
-                                    update_payment_status(student.get("id"), "Paid")
-                                    st.rerun()
-                        with col_status2:
-                            if payment.get("status") != "Unpaid":
-                                if st.button("❌ Reject", key=f"reject_{payment['id']}", use_container_width=True):
-                                    update_payment_status(student.get("id"), "Unpaid")
-                                    st.rerun()
+        else:
+            st.info("No payment submissions yet")
     else:
-        st.info("No payment submissions yet")
-
-def update_payment_status(student_id, status):
-    students = get_students()
-    for student in students:
-        if student.get("id") == student_id:
-            student["payment_status"] = status
-            break
-    save_students(students)
-    
-    payments = get_payments()
-    for payment in payments:
-        if payment.get("student_id") == student_id:
-            payment["status"] = status
-            break
-    save_payments(payments)
+        st.info("No student records available")
 
 def show_student_management():
     st.title("👥 Student Management")
     
-    tab1, tab2 = st.tabs(["Manage Students", "Add New Student"])
+    tab1, tab2, tab3 = st.tabs(["Manage Students", "Add New Student", "Bulk Delete Students"])
     
     with tab1:
         students = get_students()
@@ -1114,282 +1121,254 @@ def show_student_management():
                             pass
                 filtered_students = filtered_by_date
             
-            # Display students in a table
-            if filtered_students:
-                # Create DataFrame for better display
-                df = pd.DataFrame([
-                    {
-                        "Name": s.get("name", ""),
-                        "Roll Number": s.get("roll_number", ""),
-                        "Payment Status": s.get("payment_status", "Pending"),
-                        "Payment Date": format_datetime(s.get("payment_datetime", "")),
-                        "Timestamp Type": "Auto" if s.get("auto_timestamp") else "Manual",
-                        "Account Used": s.get("payment_account_used", "Not specified"),
-                        "Admin Remarks": s.get("admin_remarks", ""),
-                        "Added By": "Admin" if s.get("added_by_admin") else "Student",
-                        "Registration Date": format_datetime(s.get("registration_date", ""))
-                    }
-                    for s in filtered_students
-                ])
-                
-                # Display the dataframe
-                st.dataframe(df, use_container_width=True, hide_index=True)
-                
-                # Individual student management below the table
-                st.subheader("Manage Individual Students")
-                for student in filtered_students:
-                    with st.expander(f"Manage: {student.get('name')} (Roll: {student.get('roll_number')})"):
-                        col1, col2, col3, col4 = st.columns([2, 2, 2, 2])
-                        
-                        with col1:
-                            st.write(f"**Name:** {student.get('name')}")
-                        with col2:
-                            st.write(f"**Roll Number:** {student.get('roll_number')}")
-                        with col3:
-                            added_by = "Admin" if student.get("added_by_admin") else "Student"
-                            st.write(f"**Added By:** {added_by}")
-                        with col4:
-                            status = student.get("payment_status", "Pending")
-                            color = {"Paid": "green", "Unpaid": "red", "Pending": "orange"}.get(status, "gray")
-                            st.markdown(f"**Status:** <span style='color:{color}'>{status}</span>", 
-                                      unsafe_allow_html=True)
-                        
-                        # Show payment date and time
+            # Display students in a list view - SINGLE ROW PER STUDENT
+            st.subheader(f"Student List ({len(filtered_students)} students)")
+            
+            for student in filtered_students:
+                with st.container():
+                    # Create a single row with columns
+                    col1, col2, col3, col4, col5, col6, col7 = st.columns([3, 2, 2, 2, 2, 2, 2])
+                    
+                    with col1:
+                        st.write(f"**{student.get('name')}**")
+                        st.write(f"Roll: {student.get('roll_number')}")
+                    
+                    with col2:
+                        status = student.get("payment_status", "Pending")
+                        color = {"Paid": "green", "Unpaid": "red", "Pending": "orange"}.get(status, "gray")
+                        st.markdown(f"<span style='color:{color}; font-weight:bold'>{status}</span>", 
+                                  unsafe_allow_html=True)
+                    
+                    with col3:
                         if student.get("payment_datetime"):
-                            formatted_datetime = format_datetime(student.get("payment_datetime"))
-                            timestamp_type = "Auto-generated (Student submission)" if student.get("auto_timestamp") else "Manually set by Admin"
-                            st.info(f"**Payment Date & Time:** {formatted_datetime}")
-                            st.info(f"**Timestamp Type:** {timestamp_type}")
+                            formatted_date = format_datetime(student.get("payment_datetime"))
+                            st.write(f"**Date:** {formatted_date}")
+                    
+                    with col4:
+                        # Screenshot View button
+                        if student.get("payments") and len(student["payments"]) > 0:
+                            payment = student["payments"][0]
+                            if payment.get("screenshot") and not payment.get("screenshot_deleted"):
+                                if st.button("📸", key=f"view_ss_{student['id']}", help="View Screenshot"):
+                                    screenshot_path = UPLOADS_DIR / payment.get("screenshot")
+                                    if screenshot_path.exists():
+                                        with open(screenshot_path, "rb") as f:
+                                            img_bytes = f.read()
+                                        st.image(img_bytes, caption=f"Screenshot for {student.get('name')}", use_column_width=True)
+                            else:
+                                st.write("No screenshot")
+                    
+                    with col5:
+                        # Paid button
+                        if student.get("payment_status") != "Paid":
+                            if st.button("✅ Paid", key=f"paid_{student['id']}", type="primary"):
+                                student["payment_status"] = "Paid"
+                                if student.get("payments"):
+                                    for payment in student["payments"]:
+                                        payment["status"] = "Paid"
+                                save_students(students)
+                                st.success(f"Marked {student.get('name')} as Paid")
+                                st.rerun()
+                    
+                    with col6:
+                        # Unpaid button
+                        if student.get("payment_status") != "Unpaid":
+                            if st.button("❌ Unpaid", key=f"unpaid_{student['id']}", type="secondary"):
+                                student["payment_status"] = "Unpaid"
+                                if student.get("payments"):
+                                    for payment in student["payments"]:
+                                        payment["status"] = "Unpaid"
+                                save_students(students)
+                                st.success(f"Marked {student.get('name')} as Unpaid")
+                                st.rerun()
+                    
+                    with col7:
+                        # Delete Student button
+                        if st.button("🗑️ Delete", key=f"delete_{student['id']}", type="secondary"):
+                            if delete_student_by_id(student.get("id")):
+                                st.success(f"Deleted {student.get('name')}")
+                                st.rerun()
+                    
+                    # Admin Controls expandable section
+                    with st.expander(f"Admin Controls for {student.get('name')}"):
+                        # Admin Controls Section
+                        st.subheader("Admin Controls")
                         
-                        # Show payment account used
-                        if student.get("payment_account_used"):
-                            st.info(f"**Payment Account Used:** {student.get('payment_account_used')}")
+                        col_control1, col_control2 = st.columns(2)
                         
-                        # Check if screenshot was deleted
-                        if student.get("screenshot_deleted"):
-                            st.warning("⚠️ Payment screenshot has been deleted")
-                        
-                        # Show payment history with screenshot management
-                        st.subheader("Payment History & Screenshot Management")
-                        payments = get_student_payments(student.get("id"))
-                        if payments:
-                            for payment in payments:
-                                with st.expander(f"Payment: {payment.get('transaction_id')} - {payment.get('status')}"):
-                                    col_info1, col_info2 = st.columns(2)
-                                    with col_info1:
-                                        st.write(f"**Amount:** PKR{payment.get('amount')}")
-                                        st.write(f"**Date:** {format_datetime(payment.get('payment_datetime'))}")
-                                    with col_info2:
-                                        st.write(f"**Account:** {payment.get('payment_account')}")
-                                        st.write(f"**Status:** {payment.get('status')}")
-                                    
-                                    # Screenshot section
-                                    st.write("**Screenshot:**")
-                                    screenshot_settings = get_screenshot_settings()
-                                    
-                                    if payment.get("screenshot_deleted"):
-                                        st.warning("🗑️ Screenshot has been deleted")
-                                    elif payment.get("screenshot"):
-                                        col_ss1, col_ss2, col_ss3 = st.columns(3)
-                                        
-                                        with col_ss1:
-                                            # View button
-                                            screenshot_path = UPLOADS_DIR / payment.get("screenshot")
-                                            if screenshot_path.exists():
-                                                with open(screenshot_path, "rb") as f:
-                                                    img_bytes = f.read()
-                                                if st.button("👁️ View", key=f"view_payment_{payment['id']}", use_container_width=True):
-                                                    st.image(img_bytes, caption="Payment Screenshot", use_column_width=True)
-                                            else:
-                                                st.warning("File not found")
-                                        
-                                        with col_ss2:
-                                            # Download button
-                                            if screenshot_path.exists():
-                                                with open(screenshot_path, "rb") as f:
-                                                    img_bytes = f.read()
-                                                if screenshot_settings.get("allow_download", True):
-                                                    st.download_button(
-                                                        "📥 Download",
-                                                        img_bytes,
-                                                        file_name=payment.get("screenshot"),
-                                                        key=f"download_payment_{payment['id']}",
-                                                        use_container_width=True
-                                                    )
-                                                else:
-                                                    st.warning("Download disabled")
-                                            else:
-                                                st.warning("File not found")
-                                        
-                                        with col_ss3:
-                                            # Delete button
-                                            if screenshot_settings.get("allow_delete", True):
-                                                if st.button("🗑️ Delete", key=f"delete_payment_{payment['id']}", type="secondary", use_container_width=True):
-                                                    if delete_screenshot_file(payment.get("screenshot")):
-                                                        remove_screenshot_from_payment(payment.get("id"))
-                                                        remove_screenshot_from_student(payment.get("student_id"))
-                                                        st.success("Screenshot deleted successfully!")
-                                                        st.rerun()
-                                                    else:
-                                                        st.error("Failed to delete screenshot")
-                                            else:
-                                                st.warning("Delete disabled")
-                                    else:
-                                        st.info("No screenshot uploaded")
-                                    
-                                    # Quick status update
-                                    col_status1, col_status2 = st.columns(2)
-                                    with col_status1:
-                                        if payment.get("status") != "Paid":
-                                            if st.button("✅ Mark as Paid", key=f"paid_{payment['id']}", use_container_width=True):
-                                                payment["status"] = "Paid"
-                                                save_payments(payments)
-                                                student["payment_status"] = "Paid"
-                                                save_students(students)
-                                                st.success("Payment marked as Paid!")
-                                                st.rerun()
-                                    with col_status2:
-                                        if payment.get("status") != "Unpaid":
-                                            if st.button("❌ Mark as Unpaid", key=f"unpaid_{payment['id']}", use_container_width=True):
-                                                payment["status"] = "Unpaid"
-                                                save_payments(payments)
-                                                student["payment_status"] = "Unpaid"
-                                                save_students(students)
-                                                st.success("Payment marked as Unpaid!")
-                                                st.rerun()
-                        
-                        # Update payment date and time (Admin can modify)
-                        st.subheader("Update Payment Date & Time")
-                        st.warning("Admin can modify the payment timestamp if needed")
-                        
-                        col1, col2 = st.columns(2)
-                        with col1:
+                        with col_control1:
+                            # Update payment date
+                            st.write("**Update Payment Date & Time**")
+                            
                             if student.get("payment_datetime"):
                                 current_dt = datetime.fromisoformat(student.get("payment_datetime"))
                             else:
                                 current_dt = datetime.now()
                             
+                            # Date selection
                             new_payment_date = st.date_input(
                                 "New Payment Date",
                                 value=current_dt.date(),
                                 key=f"date_{student['id']}"
                             )
-                        with col2:
-                            new_payment_time = st.time_input(
-                                "New Payment Time",
-                                value=current_dt.time(),
-                                key=f"time_{student['id']}"
+                            
+                            # Time selection with AM/PM
+                            col_time1, col_time2, col_time3 = st.columns(3)
+                            with col_time1:
+                                hour_options = list(range(1, 13))
+                                current_hour = current_dt.strftime("%I").lstrip("0")
+                                current_hour = "12" if current_hour == "0" else current_hour
+                                hour = st.selectbox("Hour", hour_options, index=hour_options.index(int(current_hour)), key=f"hour_{student['id']}")
+                            with col_time2:
+                                minute_options = [f"{m:02d}" for m in range(0, 60)]
+                                current_minute = current_dt.minute
+                                minute = st.selectbox("Minute", list(range(0, 60)), index=current_minute, key=f"minute_{student['id']}")
+                            with col_time3:
+                                am_pm_options = ["AM", "PM"]
+                                current_am_pm = current_dt.strftime("%p")
+                                am_pm = st.selectbox("AM/PM", am_pm_options, index=am_pm_options.index(current_am_pm), key=f"ampm_{student['id']}")
+                            
+                            # Convert 12-hour to 24-hour format
+                            hour_24 = hour
+                            if am_pm == "PM" and hour != 12:
+                                hour_24 = hour + 12
+                            elif am_pm == "AM" and hour == 12:
+                                hour_24 = 0
+                            
+                            new_payment_datetime = datetime(
+                                new_payment_date.year,
+                                new_payment_date.month,
+                                new_payment_date.day,
+                                hour_24,
+                                minute
                             )
+                            
+                            # Validate date/time
+                            security_settings = get_security_settings()
+                            allow_future = security_settings.get("allow_future_dates", False)
+                            is_valid, error_msg = validate_future_date(new_payment_date, new_payment_datetime.time(), allow_future)
+                            
+                            if not is_valid:
+                                st.error(error_msg)
                         
-                        new_payment_datetime = datetime.combine(new_payment_date, new_payment_time)
-                        
-                        if new_payment_datetime.isoformat() != student.get("payment_datetime"):
-                            if st.button("Update Payment Date/Time", key=f"update_dt_{student['id']}"):
-                                student["payment_datetime"] = new_payment_datetime.isoformat()
-                                student["auto_timestamp"] = False  # Mark as manually set by admin
-                                
-                                # Update payment record if exists
-                                payments = get_payments()
-                                for payment in payments:
-                                    if payment.get("student_id") == student.get("id"):
-                                        payment["payment_datetime"] = new_payment_datetime.isoformat()
-                                        payment["auto_timestamp"] = False  # Mark as manually set by admin
-                                        break
-                                save_payments(payments)
-                                
-                                save_students(students)
-                                st.success("Payment date/time updated!")
-                                st.rerun()
-                        
-                        # Status update section
-                        st.subheader("Update Payment Status")
-                        col1, col2 = st.columns([3, 1])
-                        with col1:
-                            # Status update dropdown
+                        with col_control2:
+                            # Update payment status
+                            st.write("**Update Payment Status**")
+                            current_status = student.get("payment_status", "Pending")
                             new_status = st.selectbox(
-                                "Update Status",
+                                "Status",
                                 ["Paid", "Unpaid", "Pending"],
-                                index=["Paid", "Unpaid", "Pending"].index(status),
-                                key=f"status_{student['id']}"
-                            )
-                        with col2:
-                            st.write("")  # Spacer
-                            if new_status != status:
-                                if st.button("Update Status", key=f"update_{student['id']}"):
-                                    update_payment_status(student.get("id"), new_status)
-                                    st.success("Status updated!")
-                                    st.rerun()
-                        
-                        # Update payment account used
-                        payment_accounts = get_payment_accounts()
-                        if payment_accounts:
-                            current_account = student.get("payment_account_used", "")
-                            account_options = [f"{acc.get('bank')} - {acc.get('account')} - {acc.get('name')}" for acc in payment_accounts]
-                            
-                            if current_account not in account_options and current_account:
-                                account_options.insert(0, current_account)
-                            
-                            new_account = st.selectbox(
-                                "Update Payment Account Used",
-                                options=account_options,
-                                index=account_options.index(current_account) if current_account in account_options else 0,
-                                key=f"account_{student['id']}"
+                                index=["Paid", "Unpaid", "Pending"].index(current_status),
+                                key=f"status_select_{student['id']}"
                             )
                             
-                            if new_account != current_account:
-                                if st.button("Update Account", key=f"update_acc_{student['id']}"):
-                                    student["payment_account_used"] = new_account
-                                    save_students(students)
-                                    
-                                    # Update payment record if exists
-                                    payments = get_payments()
-                                    for payment in payments:
-                                        if payment.get("student_id") == student.get("id"):
-                                            payment["payment_account"] = new_account
-                                            break
-                                    save_payments(payments)
-                                    
-                                    st.success("Payment account updated!")
-                                    st.rerun()
+                            # Update account type
+                            st.write("**Update Payment Account**")
+                            payment_accounts = get_payment_accounts()
+                            if payment_accounts:
+                                account_options = [f"{acc.get('bank')} - {acc.get('account')} - {acc.get('name')}" for acc in payment_accounts]
+                                current_account = ""
+                                if student.get("payments") and len(student["payments"]) > 0:
+                                    current_account = student["payments"][0].get("payment_account", "")
+                                
+                                if current_account not in account_options and current_account:
+                                    account_options.insert(0, current_account)
+                                
+                                new_account = st.selectbox(
+                                    "Account",
+                                    options=account_options,
+                                    index=account_options.index(current_account) if current_account in account_options else 0,
+                                    key=f"account_select_{student['id']}"
+                                )
+                            else:
+                                new_account = ""
+                                st.warning("No payment accounts configured")
+                            
+                            # Admin remarks
+                            st.write("**Admin Remarks**")
+                            admin_remarks = st.text_area(
+                                "Remarks",
+                                value=student.get("admin_remarks", ""),
+                                height=100,
+                                key=f"remarks_{student['id']}"
+                            )
                         
-                        # Admin remarks
-                        admin_remarks = st.text_area(
-                            "Admin Remarks",
-                            value=student.get("admin_remarks", ""),
-                            key=f"remarks_{student['id']}",
-                            height=100
-                        )
-                        if admin_remarks != student.get("admin_remarks", ""):
-                            if st.button("Save Remarks", key=f"save_remarks_{student['id']}"):
+                        # Save changes button
+                        if st.button("💾 Save Changes", key=f"save_{student['id']}", type="primary"):
+                            if is_valid:
+                                # Update student data
+                                student["payment_datetime"] = new_payment_datetime.isoformat()
+                                student["payment_status"] = new_status
                                 student["admin_remarks"] = admin_remarks
+                                student["auto_timestamp"] = False
+                                
+                                # Update payment records
+                                if student.get("payments"):
+                                    for payment in student["payments"]:
+                                        payment["payment_datetime"] = new_payment_datetime.isoformat()
+                                        payment["status"] = new_status
+                                        payment["auto_timestamp"] = False
+                                        if new_account:
+                                            payment["payment_account"] = new_account
+                                
                                 save_students(students)
-                                st.success("Remarks updated!")
+                                st.success("Student data updated successfully!")
                                 st.rerun()
+                            else:
+                                st.error("Cannot save changes due to validation errors")
                         
-                        # Delete student button
-                        if st.button("Delete Student", key=f"delete_{student['id']}", type="secondary"):
-                            # Remove student from students list
-                            updated_students = [s for s in students if s.get("id") != student.get("id")]
-                            save_students(updated_students)
-                            
-                            # Remove student's payments
-                            payments = get_payments()
-                            updated_payments = [p for p in payments if p.get("student_id") != student.get("id")]
-                            save_payments(updated_payments)
-                            
-                            # Delete uploaded files if any
-                            student_payments = get_student_payments(student.get("id"))
-                            for payment in student_payments:
-                                if payment.get("screenshot"):
-                                    delete_screenshot_file(payment.get("screenshot"))
-                            
-                            st.success("Student deleted successfully!")
-                            st.rerun()
-            else:
-                st.info("No students found matching your criteria")
+                        # Payment History & Screenshot Management in list format
+                        st.subheader("Payment History & Screenshots")
+                        
+                        if student.get("payments"):
+                            for idx, payment in enumerate(student["payments"]):
+                                col_pay1, col_pay2, col_pay3, col_pay4 = st.columns([2, 2, 2, 2])
+                                
+                                with col_pay1:
+                                    st.write(f"**Txn ID:** {payment.get('transaction_id')}")
+                                    st.write(f"**Amount:** PKR {payment.get('amount')}")
+                                
+                                with col_pay2:
+                                    st.write(f"**Status:** {payment.get('status')}")
+                                    st.write(f"**Date:** {format_datetime(payment.get('payment_datetime'))}")
+                                
+                                with col_pay3:
+                                    st.write(f"**Account:** {payment.get('payment_account', 'N/A')}")
+                                
+                                with col_pay4:
+                                    # Screenshot management
+                                    if payment.get("screenshot"):
+                                        if payment.get("screenshot_deleted"):
+                                            st.warning("Screenshot deleted")
+                                        else:
+                                            screenshot_path = UPLOADS_DIR / payment.get("screenshot")
+                                            if screenshot_path.exists():
+                                                col_ss1, col_ss2 = st.columns(2)
+                                                with col_ss1:
+                                                    if st.button("View", key=f"view_payment_{payment['id']}"):
+                                                        with open(screenshot_path, "rb") as f:
+                                                            img_bytes = f.read()
+                                                        st.image(img_bytes, caption="Payment Screenshot", use_column_width=True)
+                                                with col_ss2:
+                                                    if st.button("Delete", key=f"del_ss_{payment['id']}", type="secondary"):
+                                                        if delete_screenshot_file(payment.get("screenshot")):
+                                                            remove_screenshot_from_student(student["id"], idx)
+                                                            st.success("Screenshot deleted")
+                                                            st.rerun()
+                                            else:
+                                                st.error("File not found")
+                                    else:
+                                        st.info("No screenshot")
+                                
+                                st.divider()
+                        else:
+                            st.info("No payment history available")
+                    
+                    st.divider()
         else:
-            st.info("No students found")
+            st.info("No students found matching your criteria")
     
+    # TAB 2: Add New Student
     with tab2:
         st.subheader("Add New Student Manually")
         
@@ -1409,106 +1388,232 @@ def show_student_management():
                     help="Select current payment status"
                 )
                 
-                # Payment date and time (optional for admin)
+                # Payment date and time with auto-selected current time
+                st.write("**Payment Date & Time**")
                 col_date1, col_date2 = st.columns(2)
                 with col_date1:
                     payment_date = st.date_input(
-                        "Payment Date (Optional)",
+                        "Payment Date",
                         value=datetime.now().date(),
-                        help="Leave as today's date for auto-timestamp"
+                        help="Select payment date"
                     )
                 with col_date2:
-                    payment_time = st.time_input(
-                        "Payment Time (Optional)",
-                        value=datetime.now().time(),
-                        help="Leave as current time for auto-timestamp"
-                    )
+                    # Auto-select current time
+                    current_time = datetime.now()
+                    col_time1, col_time2, col_time3 = st.columns(3)
+                    with col_time1:
+                        hour_options = list(range(1, 13))
+                        current_hour = current_time.strftime("%I").lstrip("0")
+                        current_hour = "12" if current_hour == "0" else current_hour
+                        hour = st.selectbox("Hour", hour_options, index=hour_options.index(int(current_hour)))
+                    with col_time2:
+                        minute_options = list(range(0, 60))
+                        current_minute = current_time.minute
+                        minute = st.selectbox("Minute", minute_options, index=current_minute)
+                    with col_time3:
+                        am_pm_options = ["AM", "PM"]
+                        current_am_pm = current_time.strftime("%p")
+                        am_pm = st.selectbox("AM/PM", am_pm_options, index=am_pm_options.index(current_am_pm))
                 
-                # Combine date and time
-                payment_datetime = datetime.combine(payment_date, payment_time)
+                # Convert 12-hour to 24-hour format
+                hour_24 = hour
+                if am_pm == "PM" and hour != 12:
+                    hour_24 = hour + 12
+                elif am_pm == "AM" and hour == 12:
+                    hour_24 = 0
                 
-                st.info("Note: Payment timestamp will be recorded automatically if not specified")
+                payment_datetime = datetime(
+                    payment_date.year,
+                    payment_date.month,
+                    payment_date.day,
+                    hour_24,
+                    minute
+                )
                 
-                # Payment account selection (required for Paid status)
+                # Validate date/time
+                security_settings = get_security_settings()
+                allow_future = security_settings.get("allow_future_dates", False)
+                is_valid_date, date_error = validate_future_date(payment_date, payment_datetime.time(), allow_future)
+                
+                if not is_valid_date:
+                    st.error(date_error)
+                
+                # Payment account selection
                 if payment_accounts:
                     account_options = [f"{acc.get('bank')} - {acc.get('account')} - {acc.get('name')}" for acc in payment_accounts]
                     account_options.insert(0, "Select Account")
                     
-                    if payment_status == "Paid":
-                        selected_account = st.selectbox(
-                            "Payment Account Used*",
-                            options=account_options,
-                            index=1 if len(account_options) > 1 else 0,
-                            help="Select which account the student paid to"
-                        )
-                    else:
-                        selected_account = st.selectbox(
-                            "Payment Account Used",
-                            options=account_options,
-                            index=0,
-                            help="Select if known, or leave as 'Select Account'"
-                        )
+                    selected_account = st.selectbox(
+                        "Payment Account Used",
+                        options=account_options,
+                        index=1 if payment_status == "Paid" and len(account_options) > 1 else 0,
+                        help="Select which account the student paid to"
+                    )
                 else:
                     st.warning("No payment accounts configured. Please add accounts in Payment Settings.")
                     selected_account = None
-                
+            
             with col2:
                 transaction_id = st.text_input(
                     "Transaction ID", 
                     help="Enter transaction ID if payment is made"
                 )
                 amount_paid = st.number_input(
-                    "Amount Paid (PK)*",
+                    "Amount Paid (PKR)*",
                     min_value=0,
                     value=payment_amount if payment_status == "Paid" else 0,
                     help="Enter the amount student actually paid"
                 )
+                
+                # Screenshot upload for admin
+                st.write("**Payment Screenshot (Optional)**")
+                screenshot_settings = get_screenshot_settings()
+                max_file_size = screenshot_settings.get("max_file_size_mb", 5)
+                payment_screenshot = st.file_uploader(
+                    f"Upload Payment Screenshot (Max: {max_file_size}MB)",
+                    type=['png', 'jpg', 'jpeg'],
+                    help=f"Maximum file size: {max_file_size}MB"
+                )
+                
                 admin_remarks = st.text_area("Admin Remarks", help="Any remarks from admin", height=100)
                 
-                # Additional information
-                submitted_by = st.selectbox(
-                    "Submitted By",
-                    ["Student", "Admin"],
-                    help="Who submitted this payment information"
-                )
+                # Validation for paid without screenshot
+                security_settings = get_security_settings()
+                require_screenshot = security_settings.get("require_screenshot_for_paid", True)
+                
+                if payment_status == "Paid" and require_screenshot and not payment_screenshot:
+                    st.warning("⚠️ Screenshot is required for paid status")
             
             submitted = st.form_submit_button("Add Student")
             
             if submitted:
+                # Validation checks
                 if not name or not roll_number:
                     st.error("Please fill all required fields (Name and Roll Number)")
-                elif payment_status == "Paid" and (not selected_account or selected_account == "Select Account"):
-                    st.error("Please select a payment account for paid student")
                 elif payment_status == "Paid" and amount_paid <= 0:
                     st.error("Please enter a valid amount for paid student")
-                elif payment_status == "Paid" and not transaction_id:
-                    st.warning("Transaction ID is recommended for paid students")
-                    # Allow without transaction ID but ask for confirmation
-                    if st.button("Confirm Add Without Transaction ID"):
+                elif payment_status == "Paid" and require_screenshot and not payment_screenshot:
+                    st.error("Screenshot is required for paid status")
+                elif not is_valid_date:
+                    st.error("Invalid date/time selected")
+                else:
+                    # Check for duplicate roll number
+                    students = get_students()
+                    if any(s.get("roll_number") == roll_number for s in students):
+                        st.error("Roll number already exists")
+                    else:
+                        # Add student with details
                         add_student_with_details(
                             name, roll_number, payment_status, selected_account, 
                             transaction_id, amount_paid, admin_remarks, 
-                            payment_datetime, submitted_by
+                            payment_datetime, "Admin", payment_screenshot
                         )
+    
+    # TAB 3: Bulk Delete Students
+    with tab3:
+        st.subheader("🗑️ Bulk Delete Students")
+        st.warning("⚠️ **WARNING:** This action cannot be undone! All selected students and their data will be permanently deleted.")
+        
+        students = get_students()
+        
+        if students:
+            # Filter options for bulk delete
+            col1, col2 = st.columns(2)
+            with col1:
+                bulk_filter_status = st.selectbox("Filter by Status", ["All", "Paid", "Unpaid", "Pending"], key="bulk_filter")
+            with col2:
+                bulk_search = st.text_input("Search by Name or Roll Number", key="bulk_search")
+            
+            # Apply filters
+            filtered_students = students
+            if bulk_filter_status != "All":
+                filtered_students = [s for s in filtered_students if s.get("payment_status") == bulk_filter_status]
+            
+            if bulk_search:
+                filtered_students = [s for s in filtered_students 
+                                   if bulk_search.lower() in s.get("name", "").lower() 
+                                   or bulk_search in s.get("roll_number", "")]
+            
+            if filtered_students:
+                st.info(f"Found {len(filtered_students)} students matching your criteria")
+                
+                # Create checkboxes for each student
+                selected_students = []
+                
+                for student in filtered_students:
+                    col1, col2, col3 = st.columns([1, 3, 2])
+                    with col1:
+                        selected = st.checkbox("", key=f"select_{student['id']}")
+                        if selected:
+                            selected_students.append(student["id"])
+                    with col2:
+                        st.write(f"**{student.get('name')}**")
+                    with col3:
+                        st.write(f"Roll: {student.get('roll_number')}")
+                    
+                    st.divider()
+                
+                # Summary of selected students
+                if selected_students:
+                    st.subheader(f"Selected {len(selected_students)} Students for Deletion")
+                    
+                    # Confirmation for deletion
+                    st.error("""
+                    **Deletion will permanently remove:**
+                    - Student records
+                    - All payment records
+                    - Uploaded screenshots
+                    - All associated data
+                    """)
+                    
+                    # Double confirmation
+                    confirm_text = st.text_input("Type 'DELETE' to confirm")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("🗑️ Delete Selected Students", type="secondary", disabled=confirm_text != "DELETE"):
+                            if confirm_text == "DELETE":
+                                with st.spinner("Deleting selected students..."):
+                                    success_count, fail_count = delete_multiple_students(selected_students)
+                                    
+                                    if success_count > 0:
+                                        st.success(f"Successfully deleted {success_count} students!")
+                                        if fail_count > 0:
+                                            st.warning(f"Failed to delete {fail_count} students")
+                                        st.rerun()
+                                    else:
+                                        st.error("Failed to delete any students")
+                            else:
+                                st.warning("Please type 'DELETE' to confirm")
+                    
+                    with col2:
+                        if st.button("Clear Selection"):
+                            st.rerun()
                 else:
-                    add_student_with_details(
-                        name, roll_number, payment_status, selected_account, 
-                        transaction_id, amount_paid, admin_remarks, 
-                        payment_datetime, submitted_by
-                    )
+                    st.info("Select students by checking the boxes to enable deletion")
+            else:
+                st.info("No students found matching your criteria")
+        else:
+            st.info("No students found to delete")
 
 def add_student_with_details(name, roll_number, payment_status, selected_account, 
                             transaction_id, amount_paid, admin_remarks, 
-                            payment_datetime, submitted_by):
+                            payment_datetime, submitted_by, payment_screenshot=None):
     """Helper function to add student with all details"""
     students = get_students()
     
-    # Check for duplicate roll number
-    if any(s.get("roll_number") == roll_number for s in students):
-        st.error("Roll number already exists")
-        return
-    
     student_id = str(uuid.uuid4())
+    
+    # Handle screenshot upload if provided
+    screenshot_filename = None
+    if payment_screenshot and payment_screenshot.size > 0:
+        try:
+            screenshot_filename = save_uploaded_file(payment_screenshot, student_id)
+        except Exception as e:
+            st.error(f"Error uploading screenshot: {e}")
+            return
+    
+    # Create student data with improved structure
     student_data = {
         "id": student_id,
         "name": name,
@@ -1518,23 +1623,18 @@ def add_student_with_details(name, roll_number, payment_status, selected_account
         "registration_date": datetime.now().isoformat(),
         "student_remarks": "",
         "added_by_admin": submitted_by == "Admin",
-        "payment_account_used": selected_account if selected_account != "Select Account" else None,
         "payment_datetime": payment_datetime.isoformat(),
-        "auto_timestamp": submitted_by == "Student",  # Auto-timestamp only for student submissions
-        "screenshot_deleted": False
+        "auto_timestamp": False,  # Admin-added students have manual timestamps
+        "payments": []
     }
     
-    students.append(student_data)
-    save_students(students)
-    
-    # If student is marked as paid, also create a payment record
+    # Add payment record if status is Paid
     if payment_status == "Paid" and amount_paid > 0:
-        payment_data = {
+        payment_record = {
             "id": str(uuid.uuid4()),
-            "student_id": student_id,
-            "transaction_id": transaction_id or f"ADMIN-ADDED-{roll_number}",
+            "transaction_id": transaction_id or f"ADMIN-{roll_number}",
             "amount": amount_paid,
-            "screenshot": None,
+            "screenshot": screenshot_filename,
             "screenshot_deleted": False,
             "status": "Paid",
             "submission_date": datetime.now().isoformat(),
@@ -1543,13 +1643,13 @@ def add_student_with_details(name, roll_number, payment_status, selected_account
             "admin_remarks": admin_remarks,
             "payment_account": selected_account if selected_account != "Select Account" else "Not specified",
             "added_by_admin": submitted_by == "Admin",
-            "auto_timestamp": submitted_by == "Student",
+            "auto_timestamp": False,
             "verified_by_admin": True
         }
-        
-        payments = get_payments()
-        payments.append(payment_data)
-        save_payments(payments)
+        student_data["payments"].append(payment_record)
+    
+    students.append(student_data)
+    save_students(students)
     
     st.success("Student added successfully!")
     st.balloons()
@@ -1564,63 +1664,84 @@ def show_payment_settings():
     tab_visibility = get_tab_visibility()
     base_url = get_base_url()
     
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Basic Settings", "Account Details", "Form Control", "Tab Visibility", "Contact Info", "Instructions"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Basic Settings", "Account Details", "Form Control", "Tab Visibility", "Contact Info", "Instructions", "Security"])
     
     with tab1:
         st.subheader("Payment Configuration")
         
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            payment_amount = st.number_input(
-                "Payment Amount (PKR)",
-                min_value=0,
-                value=admin_data.get("payment_amount", 5000)
-            )
+        # Payment Amount and Base URL in a form
+        with st.form("basic_settings_form"):
+            col1, col2 = st.columns(2)
             
-        with col2:
-            # Base URL Configuration
-            new_base_url = st.text_input(
-                "Base URL",
-                value=base_url,
-                help="Change this when deploying to a different server (e.g., https://your-domain.com)"
-            )
+            with col1:
+                payment_amount = st.number_input(
+                    "Payment Amount (PKR)*",
+                    min_value=0,
+                    value=admin_data.get("payment_amount", 5000),
+                    help="Set the fixed payment amount for students"
+                )
+                
+            with col2:
+                # Base URL Configuration
+                new_base_url = st.text_input(
+                    "Base URL*",
+                    value=base_url,
+                    help="Your app URL (e.g., https://payment-collection-form.streamlit.app)"
+                )
+            
+            # Generate new short URL code option
+            generate_new_code = st.checkbox("Generate new student URL code", value=False)
+            
+            # Save button
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                save_button = st.form_submit_button("💾 Save Basic Settings", use_container_width=True)
+            
+            if save_button:
+                if not payment_amount or not new_base_url:
+                    st.error("Please fill all required fields (*)")
+                else:
+                    # Update payment amount
+                    admin_data["payment_amount"] = payment_amount
+                    
+                    # Update base URL if changed
+                    if new_base_url != base_url:
+                        admin_data["base_url"] = new_base_url.strip().rstrip('/')
+                        st.success(f"Base URL updated to: {new_base_url}")
+                    
+                    # Generate new short URL code if requested
+                    if generate_new_code:
+                        admin_data["short_url_code"] = str(uuid.uuid4())[:8]
+                        st.success("New student URL code generated!")
+                    
+                    update_admin_data(admin_data)
+                    st.success("Basic settings saved successfully!")
+                    st.rerun()
         
-        # Generate new short URL code
-        if st.button("Generate New Student URL Code"):
-            admin_data["short_url_code"] = str(uuid.uuid4())[:8]
-            update_admin_data(admin_data)
-            st.success("New URL code generated!")
-            st.rerun()
+        # Important note about Streamlit Cloud
+        st.warning("""
+        **Important for Streamlit Cloud:**
+        1. Your Base URL should be: `https://payment-collection-form.streamlit.app`
+        2. Make sure there's no trailing slash at the end
+        3. Student portal URL format: `https://payment-collection-form.streamlit.app/?student=YOUR_CODE`
+        """)
         
-        # Current URL with copy button
-        st.subheader("Student Portal URL")
+        # Test URL button
+        if st.button("Test Student Portal URL"):
+            test_url = f"{base_url}/?student={admin_data.get('short_url_code')}"
+            st.info(f"**Test URL:** {test_url}")
+            st.markdown(f'<a href="{test_url}" target="_blank">Open Test URL in New Tab</a>', unsafe_allow_html=True)
+        
+        # Current URL display without copy button
+        st.divider()
+        st.subheader("Current Student Portal URL")
+        
         short_url = get_short_url()
+        st.code(short_url)
         
-        col1, col2, col3 = st.columns([3, 1, 1])
-        with col1:
-            st.code(short_url)
+        col1, col2 = st.columns(2)
         with col2:
-            if st.button("📋 Copy", type="secondary", use_container_width=True):
-                st.toast("URL copied to clipboard!", icon="✅")
-        with col3:
-            if st.button("🔗 Test", type="primary", use_container_width=True):
-                st.toast(f"Testing URL: {short_url}", icon="🔗")
-        
-        # URL format info
-        st.info(f"**URL Format:** {base_url}/?student=[code]")
-        
-        if st.button("Save All Settings"):
-            # Update payment amount
-            admin_data["payment_amount"] = payment_amount
-            
-            # Update base URL if changed
-            if new_base_url != base_url:
-                admin_data["base_url"] = new_base_url.strip()
-                st.success(f"Base URL updated to: {new_base_url}")
-            
-            update_admin_data(admin_data)
-            st.success("Settings saved successfully!")
+            st.markdown(f'<a href="{short_url}" target="_blank"><button style="background-color: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; width: 100%;">🔗 Open Portal</button></a>', unsafe_allow_html=True)
     
     with tab2:
         st.subheader("Payment Account Details")
@@ -1628,39 +1749,57 @@ def show_payment_settings():
         
         accounts = admin_data.get("payment_accounts", [])
         
-        for i, account in enumerate(accounts):
-            st.divider()
-            st.write(f"**Account {i+1}**")
+        # Display current accounts in a form
+        with st.form("account_details_form"):
+            st.write("**Current Accounts:**")
             
+            account_changes = []
+            for i, account in enumerate(accounts):
+                st.divider()
+                st.write(f"**Account {i+1}**")
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    bank = st.text_input("Bank Name", value=account.get("bank", ""), key=f"bank_{i}")
+                with col2:
+                    account_no = st.text_input("Account Number", value=account.get("account", ""), key=f"account_{i}")
+                with col3:
+                    account_name = st.text_input("Account Holder Name", value=account.get("name", ""), key=f"name_{i}")
+                
+                account_changes.append({"bank": bank, "account": account_no, "name": account_name})
+            
+            # Save button
             col1, col2, col3 = st.columns(3)
             with col1:
-                bank = st.text_input("Bank Name", value=account.get("bank", ""), key=f"bank_{i}")
-            with col2:
-                account_no = st.text_input("Account Number", value=account.get("account", ""), key=f"account_{i}")
-            with col3:
-                account_name = st.text_input("Account Holder Name", value=account.get("name", ""), key=f"name_{i}")
-            
-            accounts[i] = {"bank": bank, "account": account_no, "name": account_name}
+                if st.form_submit_button("💾 Save Account Details", use_container_width=True):
+                    admin_data["payment_accounts"] = account_changes
+                    update_admin_data(admin_data)
+                    st.success("Account details saved!")
+                    st.rerun()
         
-        # Add new account button
-        if st.button("Add Another Account"):
-            accounts.append({"bank": "", "account": "", "name": ""})
-            admin_data["payment_accounts"] = accounts
-            update_admin_data(admin_data)
-            st.rerun()
+        # Add/Remove account buttons
+        st.divider()
+        st.write("**Quick Actions:**")
         
-        # Remove account button
-        if len(accounts) > 1 and st.button("Remove Last Account"):
-            accounts.pop()
-            admin_data["payment_accounts"] = accounts
-            update_admin_data(admin_data)
-            st.rerun()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("➕ Add New Account"):
+                accounts.append({"bank": "", "account": "", "name": ""})
+                admin_data["payment_accounts"] = accounts
+                update_admin_data(admin_data)
+                st.success("New account added!")
+                st.rerun()
         
-        # Save accounts
-        if st.button("Save Account Details"):
-            admin_data["payment_accounts"] = accounts
-            update_admin_data(admin_data)
-            st.success("Account details saved!")
+        with col2:
+            if len(accounts) > 1:
+                if st.button("➖ Remove Last Account"):
+                    accounts.pop()
+                    admin_data["payment_accounts"] = accounts
+                    update_admin_data(admin_data)
+                    st.success("Last account removed!")
+                    st.rerun()
+            else:
+                st.button("➖ Remove Last Account", disabled=True, help="Cannot remove the only account")
     
     with tab3:
         st.subheader("📋 Form Control Center")
@@ -1700,36 +1839,38 @@ def show_payment_settings():
         
         st.divider()
         
-        # Additional Instructions
+        # Additional Instructions with save button
         st.subheader("Additional Instructions")
         st.info("These instructions appear in the Account Details tab for students")
         
-        additional_instructions = st.text_area(
-            "Enter additional instructions for students",
-            value=get_additional_instructions(),
-            height=200
-        )
-        
-        if st.button("Save Additional Instructions"):
-            update_additional_instructions(additional_instructions)
-            st.success("Additional instructions saved!")
+        with st.form("additional_instructions_form"):
+            additional_instructions = st.text_area(
+                "Enter additional instructions for students",
+                value=get_additional_instructions(),
+                height=200
+            )
+            
+            if st.form_submit_button("💾 Save Additional Instructions"):
+                update_additional_instructions(additional_instructions)
+                st.success("Additional instructions saved!")
+                st.rerun()
         
         # Form statistics
         st.divider()
         st.subheader("Form Statistics")
         
         students = get_students()
-        payments = get_payments()
         
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Total Submissions", len(payments))
+            total_payments = sum(len(s.get("payments", [])) for s in students)
+            st.metric("Total Submissions", total_payments)
         with col2:
-            pending_count = len([p for p in payments if p.get("status") == "Pending"])
+            pending_count = len([s for s in students if s.get("payment_status") == "Pending"])
             st.metric("Pending Review", pending_count)
         with col3:
             today = datetime.now().date().isoformat()
-            today_count = len([p for p in payments if p.get("submission_date", "").startswith(today)])
+            today_count = sum(1 for s in students if s.get("registration_date", "").startswith(today))
             st.metric("Today's Submissions", today_count)
     
     with tab4:
@@ -1739,55 +1880,58 @@ def show_payment_settings():
         # Get current visibility
         tab_visibility = get_tab_visibility()
         
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.write("### Enable/Disable Tabs")
+        # Tab visibility settings in a form
+        with st.form("tab_visibility_form"):
+            col1, col2 = st.columns(2)
             
-            account_details = st.checkbox(
-                "Account Details Tab",
-                value=tab_visibility.get("account_details", True),
-                help="Shows payment account details and instructions"
-            )
+            with col1:
+                st.write("### Enable/Disable Tabs")
+                
+                account_details = st.checkbox(
+                    "Account Details Tab",
+                    value=tab_visibility.get("account_details", True),
+                    help="Shows payment account details and instructions"
+                )
+                
+                submit_payment = st.checkbox(
+                    "Submit Payment Tab",
+                    value=tab_visibility.get("submit_payment", True),
+                    help="Allows students to submit payment forms"
+                )
+                
+                payment_status = st.checkbox(
+                    "Payment Status Tab",
+                    value=tab_visibility.get("payment_status", True),
+                    help="Allows students to check their payment status"
+                )
             
-            submit_payment = st.checkbox(
-                "Submit Payment Tab",
-                value=tab_visibility.get("submit_payment", True),
-                help="Allows students to submit payment forms"
-            )
+            with col2:
+                st.write("### ")  # Empty header for alignment
+                
+                student_list = st.checkbox(
+                    "Student List Tab",
+                    value=tab_visibility.get("student_list", True),
+                    help="Shows list of paid and unpaid students"
+                )
+                
+                instructions = st.checkbox(
+                    "Instructions Tab",
+                    value=tab_visibility.get("instructions", True),
+                    help="Shows general instructions from admin"
+                )
             
-            payment_status = st.checkbox(
-                "Payment Status Tab",
-                value=tab_visibility.get("payment_status", True),
-                help="Allows students to check their payment status"
-            )
-        
-        with col2:
-            st.write("### ")  # Empty header for alignment
-            
-            student_list = st.checkbox(
-                "Student List Tab",
-                value=tab_visibility.get("student_list", True),
-                help="Shows list of paid and unpaid students"
-            )
-            
-            instructions = st.checkbox(
-                "Instructions Tab",
-                value=tab_visibility.get("instructions", True),
-                help="Shows general instructions from admin"
-            )
-        
-        # Save button
-        if st.button("Save Tab Visibility Settings"):
-            new_visibility = {
-                "account_details": account_details,
-                "submit_payment": submit_payment,
-                "payment_status": payment_status,
-                "student_list": student_list,
-                "instructions": instructions
-            }
-            update_tab_visibility(new_visibility)
-            st.success("Tab visibility settings saved!")
+            # Save button
+            if st.form_submit_button("💾 Save Tab Visibility Settings"):
+                new_visibility = {
+                    "account_details": account_details,
+                    "submit_payment": submit_payment,
+                    "payment_status": payment_status,
+                    "student_list": student_list,
+                    "instructions": instructions
+                }
+                update_tab_visibility(new_visibility)
+                st.success("Tab visibility settings saved!")
+                st.rerun()
         
         # Preview what students see
         st.divider()
@@ -1808,29 +1952,6 @@ def show_payment_settings():
                 st.error("**Students see:** No tabs available (all tabs are disabled)")
         else:
             st.error("**Students see:** Only an 'unavailable' message with contact info")
-            
-            # Show preview of what students will see
-            st.markdown("**Preview of unpublished form:**")
-            st.markdown(
-                f"""
-                <div style='border: 2px dashed #666; padding: 20px; border-radius: 10px; background: #f9f9f9;'>
-                    <div style='text-align: center;'>
-                        <h2>⏸️ Payment Form Currently Unavailable</h2>
-                        <p>The payment submission form is temporarily unavailable.</p>
-                        <p>Please check back later or contact the administrator for more information.</p>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-            
-            # Contact info preview without HTML formatting
-            st.markdown("**Contact Information Preview:**")
-            col1, col2 = st.columns(2)
-            with col1:
-                st.info(f"📧 Email: {contact_info['email']}")
-            with col2:
-                st.info(f"📱 Phone: {contact_info['phone']}")
     
     with tab5:
         st.subheader("📞 Contact Information")
@@ -1840,28 +1961,72 @@ def show_payment_settings():
         current_phone = contact_info['phone']
         
         with st.form("contact_info_form"):
-            email = st.text_input("Contact Email", value=current_email)
-            phone = st.text_input("Contact Phone Number", value=current_phone)
+            email = st.text_input("Contact Email*", value=current_email)
+            phone = st.text_input("Contact Phone Number*", value=current_phone)
             
-            submitted = st.form_submit_button("Save Contact Information")
-            
-            if submitted:
-                update_contact_info(email, phone)
-                st.success("Contact information saved successfully!")
+            if st.form_submit_button("💾 Save Contact Information"):
+                if email and phone:
+                    update_contact_info(email, phone)
+                    st.success("Contact information saved successfully!")
+                    st.rerun()
+                else:
+                    st.error("Please fill all required fields (*)")
     
     with tab6:
         st.subheader("Instructions for Students")
         st.info("These instructions appear in the Instructions tab for students")
         
-        instructions = st.text_area(
-            "Enter instructions that will appear in the student panel",
-            value=get_instructions(),
-            height=300
-        )
+        with st.form("instructions_form"):
+            instructions = st.text_area(
+                "Enter instructions that will appear in the student panel",
+                value=get_instructions(),
+                height=300
+            )
+            
+            if st.form_submit_button("💾 Save Instructions"):
+                save_instructions(instructions)
+                st.success("Instructions saved!")
+                st.rerun()
+    
+    with tab7:
+        st.subheader("🔒 Security Settings")
+        st.info("Configure security and validation settings for the system")
         
-        if st.button("Save Instructions"):
-            save_instructions(instructions)
-            st.success("Instructions saved!")
+        security_settings = get_security_settings()
+        
+        with st.form("security_settings_form"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                allow_future_dates = st.checkbox(
+                    "Allow Future Dates",
+                    value=security_settings.get("allow_future_dates", False),
+                    help="Allow payment dates in the future"
+                )
+                
+                require_screenshot = st.checkbox(
+                    "Require Screenshot for Paid Status",
+                    value=security_settings.get("require_screenshot_for_paid", True),
+                    help="Block paid status without screenshot"
+                )
+            
+            with col2:
+                soft_delete_enabled = st.checkbox(
+                    "Enable Soft Delete",
+                    value=security_settings.get("soft_delete_enabled", False),
+                    help="Mark records as deleted instead of permanent removal"
+                )
+            
+            if st.form_submit_button("💾 Save Security Settings"):
+                new_settings = {
+                    "allow_future_dates": allow_future_dates,
+                    "require_screenshot_for_paid": require_screenshot,
+                    "soft_delete_enabled": soft_delete_enabled
+                }
+                admin_data["security_settings"] = new_settings
+                update_admin_data(admin_data)
+                st.success("Security settings saved!")
+                st.rerun()
 
 def show_screenshot_management():
     st.title("📸 Screenshot Management")
@@ -1891,16 +2056,14 @@ def show_screenshot_management():
             
             with col2:
                 max_file_size = st.number_input(
-                    "Maximum File Size (MB)",
+                    "Maximum File Size (MB)*",
                     min_value=1,
                     max_value=50,
                     value=screenshot_settings.get("max_file_size_mb", 5),
                     help="Maximum allowed file size for uploaded screenshots"
                 )
             
-            submitted = st.form_submit_button("Save Settings")
-            
-            if submitted:
+            if st.form_submit_button("💾 Save Settings"):
                 new_settings = {
                     "allow_download": allow_download,
                     "allow_delete": allow_delete,
@@ -1908,184 +2071,277 @@ def show_screenshot_management():
                 }
                 update_screenshot_settings(new_settings)
                 st.success("Screenshot settings saved!")
-        
-        # Current statistics
-        st.divider()
-        st.subheader("Current Statistics")
-        
-        payments = get_payments()
-        total_screenshots = len([p for p in payments if p.get("screenshot")])
-        deleted_screenshots = len([p for p in payments if p.get("screenshot_deleted")])
-        active_screenshots = total_screenshots - deleted_screenshots
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Total Screenshots", total_screenshots)
-        with col2:
-            st.metric("Active Screenshots", active_screenshots)
-        with col3:
-            st.metric("Deleted Screenshots", deleted_screenshots)
+                st.rerun()
     
     with tab2:
         st.subheader("Bulk Screenshot Operations")
         st.warning("⚠️ These operations affect multiple records at once. Use with caution!")
         
-        payments = get_payments()
+        students = get_students()
         
-        if payments:
-            # Filter options for bulk operations
-            col1, col2 = st.columns(2)
-            with col1:
-                bulk_filter_status = st.selectbox("Filter by Status", ["All", "Paid", "Unpaid", "Pending"])
-            with col2:
-                bulk_filter_date = st.selectbox("Filter by Date", ["All", "Today", "Last 7 Days", "This Month"])
+        if students:
+            # Get all payments with screenshots
+            all_payments = []
+            for student in students:
+                if student.get("payments"):
+                    for payment in student["payments"]:
+                        if payment.get("screenshot") and not payment.get("screenshot_deleted"):
+                            payment["student_name"] = student.get("name")
+                            payment["student_id"] = student.get("id")
+                            all_payments.append(payment)
             
-            # Apply filters
-            filtered_payments = payments
-            if bulk_filter_status != "All":
-                filtered_payments = [p for p in filtered_payments if p.get("status") == bulk_filter_status]
-            
-            if bulk_filter_date != "All":
-                today = datetime.now().date()
-                filtered_by_date = []
-                for payment in filtered_payments:
-                    payment_datetime = payment.get("payment_datetime")
-                    if payment_datetime:
-                        try:
-                            payment_date = datetime.fromisoformat(payment_datetime).date()
-                            if bulk_filter_date == "Today" and payment_date == today:
-                                filtered_by_date.append(payment)
-                            elif bulk_filter_date == "Last 7 Days" and (today - payment_date).days <= 7:
-                                filtered_by_date.append(payment)
-                            elif bulk_filter_date == "This Month" and payment_date.month == today.month and payment_date.year == today.year:
-                                filtered_by_date.append(payment)
-                        except:
-                            pass
-                filtered_payments = filtered_by_date
-            
-            # Count screenshots in filtered results
-            screenshots_to_process = [p for p in filtered_payments if p.get("screenshot") and not p.get("screenshot_deleted")]
-            
-            st.info(f"Found {len(screenshots_to_process)} screenshots matching your criteria")
-            
-            if screenshots_to_process:
+            if all_payments:
+                st.info(f"Found {len(all_payments)} screenshots")
+                
                 # Bulk delete option
-                st.subheader("Bulk Delete Screenshots")
-                if st.button("🗑️ Delete All Filtered Screenshots", type="secondary"):
+                if st.button("🗑️ Delete All Screenshots", type="secondary"):
                     with st.spinner("Deleting screenshots..."):
                         deleted_count = 0
-                        for payment in screenshots_to_process:
+                        for payment in all_payments:
                             if delete_screenshot_file(payment.get("screenshot")):
-                                remove_screenshot_from_payment(payment.get("id"))
-                                remove_screenshot_from_student(payment.get("student_id"))
+                                # Find and update student record
+                                for student in students:
+                                    if student.get("id") == payment["student_id"]:
+                                        for p in student.get("payments", []):
+                                            if p.get("id") == payment.get("id"):
+                                                p["screenshot"] = None
+                                                p["screenshot_deleted"] = True
+                                                p["screenshot_deleted_date"] = datetime.now().isoformat()
+                                                break
+                                        break
                                 deleted_count += 1
                         
+                        save_students(students)
                         st.success(f"Successfully deleted {deleted_count} screenshots!")
                         st.rerun()
                 
-                # View filtered payments
-                st.subheader("Filtered Payments with Screenshots")
-                for payment in screenshots_to_process[:10]:  # Show first 10
-                    student = get_student_by_id(payment.get("student_id"))
-                    if student:
-                        with st.expander(f"{student.get('name')} - {payment.get('transaction_id')}"):
-                            col_view, col_del = st.columns(2)
-                            with col_view:
+                # Display screenshots
+                for payment in all_payments[:10]:  # Show first 10
+                    with st.expander(f"{payment.get('student_name')} - {payment.get('transaction_id')}"):
+                        col_view, col_del = st.columns(2)
+                        with col_view:
+                            screenshot_path = UPLOADS_DIR / payment.get("screenshot")
+                            if screenshot_path.exists():
                                 if st.button("👁️ View", key=f"bulk_view_{payment['id']}"):
-                                    screenshot_path = UPLOADS_DIR / payment.get("screenshot")
-                                    if screenshot_path.exists():
-                                        with open(screenshot_path, "rb") as f:
-                                            img_bytes = f.read()
-                                        st.image(img_bytes, caption="Payment Screenshot", use_column_width=True)
-                            with col_del:
-                                if st.button("🗑️ Delete", key=f"bulk_delete_{payment['id']}", type="secondary"):
-                                    if delete_screenshot_file(payment.get("screenshot")):
-                                        remove_screenshot_from_payment(payment.get("id"))
-                                        remove_screenshot_from_student(payment.get("student_id"))
-                                        st.success("Screenshot deleted!")
-                                        st.rerun()
+                                    with open(screenshot_path, "rb") as f:
+                                        img_bytes = f.read()
+                                    st.image(img_bytes, caption="Payment Screenshot", use_column_width=True)
+                        with col_del:
+                            if st.button("🗑️ Delete", key=f"bulk_delete_{payment['id']}", type="secondary"):
+                                if delete_screenshot_file(payment.get("screenshot")):
+                                    # Update student record
+                                    for student in students:
+                                        if student.get("id") == payment["student_id"]:
+                                            for p in student.get("payments", []):
+                                                if p.get("id") == payment.get("id"):
+                                                    p["screenshot"] = None
+                                                    p["screenshot_deleted"] = True
+                                                    p["screenshot_deleted_date"] = datetime.now().isoformat()
+                                                    break
+                                            break
+                                    save_students(students)
+                                    st.success("Screenshot deleted!")
+                                    st.rerun()
+            else:
+                st.info("No screenshots found")
+        else:
+            st.info("No students found")
     
     with tab3:
         st.subheader("Screenshot Analytics")
         
-        payments = get_payments()
+        students = get_students()
         
-        if payments:
+        if students:
             # Calculate statistics
-            total_payments = len(payments)
-            payments_with_screenshots = [p for p in payments if p.get("screenshot")]
-            payments_without_screenshots = total_payments - len(payments_with_screenshots)
-            deleted_screenshots = len([p for p in payments if p.get("screenshot_deleted")])
-            active_screenshots = len(payments_with_screenshots) - deleted_screenshots
+            total_students = len(students)
+            
+            # Count screenshots
+            total_screenshots = 0
+            active_screenshots = 0
+            deleted_screenshots = 0
+            
+            for student in students:
+                if student.get("payments"):
+                    for payment in student["payments"]:
+                        if payment.get("screenshot"):
+                            total_screenshots += 1
+                            if payment.get("screenshot_deleted"):
+                                deleted_screenshots += 1
+                            else:
+                                active_screenshots += 1
             
             # Display metrics
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("Total Payments", total_payments)
+                st.metric("Total Students", total_students)
             with col2:
-                st.metric("With Screenshots", len(payments_with_screenshots))
-            with col3:
-                st.metric("Without Screenshots", payments_without_screenshots)
-            
-            col4, col5 = st.columns(2)
-            with col4:
                 st.metric("Active Screenshots", active_screenshots)
-            with col5:
+            with col3:
                 st.metric("Deleted Screenshots", deleted_screenshots)
             
-            # Pie chart for screenshot distribution
+            # Calculate percentages
+            if total_students > 0:
+                col4, col5 = st.columns(2)
+                with col4:
+                    students_with_screenshots = sum(1 for s in students if any(p.get("screenshot") and not p.get("screenshot_deleted") for p in s.get("payments", [])))
+                    percentage = (students_with_screenshots / total_students) * 100
+                    st.metric("Students with Screenshots", f"{students_with_screenshots} ({percentage:.1f}%)")
+                
+                with col5:
+                    if total_screenshots > 0:
+                        active_percentage = (active_screenshots / total_screenshots) * 100
+                        st.metric("Active Screenshot Rate", f"{active_percentage:.1f}%")
+                    else:
+                        st.metric("Active Screenshot Rate", "0%")
+            
+            # Status-based statistics
             st.divider()
-            st.subheader("Screenshot Distribution")
+            st.subheader("Screenshots by Payment Status")
             
-            import plotly.express as px
+            status_stats = {}
+            for status in ["Paid", "Unpaid", "Pending"]:
+                status_students = [s for s in students if s.get("payment_status") == status]
+                status_screenshots = 0
+                for student in status_students:
+                    if student.get("payments"):
+                        for payment in student["payments"]:
+                            if payment.get("screenshot") and not payment.get("screenshot_deleted"):
+                                status_screenshots += 1
+                
+                status_stats[status] = {
+                    "students": len(status_students),
+                    "screenshots": status_screenshots,
+                    "percentage": (status_screenshots / len(status_students) * 100) if len(status_students) > 0 else 0
+                }
             
-            # Create data for pie chart
-            labels = ['With Screenshots', 'Without Screenshots', 'Deleted Screenshots']
-            values = [active_screenshots, payments_without_screenshots, deleted_screenshots]
-            
-            fig = px.pie(
-                values=values,
-                names=labels,
-                title="Screenshot Distribution",
-                color_discrete_sequence=px.colors.qualitative.Set3
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Recent screenshot activity
-            st.divider()
-            st.subheader("Recent Screenshot Activity")
-            
-            recent_payments_with_screenshots = sorted(
-                [p for p in payments if p.get("screenshot")],
-                key=lambda x: x.get("submission_date", ""),
-                reverse=True
-            )[:10]
-            
-            if recent_payments_with_screenshots:
-                for payment in recent_payments_with_screenshots:
-                    student = get_student_by_id(payment.get("student_id"))
-                    if student:
-                        col_status, col_name, col_date = st.columns([1, 3, 2])
-                        with col_status:
-                            if payment.get("screenshot_deleted"):
-                                st.warning("🗑️")
-                            else:
-                                st.success("📸")
-                        with col_name:
-                            st.write(f"{student.get('name')} ({student.get('roll_number')})")
-                        with col_date:
-                            st.write(format_datetime(payment.get("submission_date")))
-                        st.divider()
+            # Display status statistics
+            for status, stats in status_stats.items():
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.write(f"**{status} Students:** {stats['students']}")
+                with col2:
+                    st.write(f"**Screenshots:** {stats['screenshots']}")
+                with col3:
+                    st.write(f"**Coverage:** {stats['percentage']:.1f}%")
+                st.divider()
 
 def show_reports():
-    st.title("📈 Reports & Exports")
+    st.title("📈 Reports & Analytics")
     
     students = get_students()
-    payments = get_payments()
     
-    tab1, tab2, tab3 = st.tabs(["Student Data", "Payment Data", "Analytics"])
+    tab1, tab2, tab3 = st.tabs(["Student Data", "Export Data", "Analytics"])
     
     with tab1:
+        st.subheader("Student Data Summary")
+        
+        if students:
+            # Create DataFrames for paid and unpaid
+            paid_students = [s for s in students if s.get("payment_status") == "Paid"]
+            unpaid_students = [s for s in students if s.get("payment_status") == "Unpaid"]
+            pending_students = [s for s in students if s.get("payment_status") == "Pending"]
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Paid Students", len(paid_students))
+            with col2:
+                st.metric("Unpaid Students", len(unpaid_students))
+            with col3:
+                st.metric("Pending Students", len(pending_students))
+            
+            # Payment summary - FIXED
+            st.divider()
+            st.subheader("Payment Summary")
+            
+            # Calculate total collected amount
+            total_collected = 0
+            expected_amount = 0
+            payment_amount = get_payment_amount()
+            
+            for student in paid_students:
+                if student.get("payments"):
+                    for payment in student["payments"]:
+                        if payment.get("status") == "Paid":
+                            total_collected += payment.get("amount", 0)
+                expected_amount += payment_amount
+            
+            # Calculate statistics
+            total_students = len(students)
+            paid_percentage = (len(paid_students) / total_students * 100) if total_students > 0 else 0
+            collection_rate = (total_collected / expected_amount * 100) if expected_amount > 0 else 0
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Collected", f"PKR {total_collected:,}")
+            with col2:
+                st.metric("Expected Amount", f"PKR {expected_amount:,}")
+            with col3:
+                st.metric("Paid Percentage", f"{paid_percentage:.1f}%")
+            with col4:
+                st.metric("Collection Rate", f"{collection_rate:.1f}%")
+            
+            # Monthly trend
+            st.divider()
+            st.subheader("Monthly Collection Trend")
+            
+            # Group by month
+            monthly_data = {}
+            for student in students:
+                if student.get("payment_datetime") and student.get("payment_status") == "Paid":
+                    try:
+                        payment_date = datetime.fromisoformat(student.get("payment_datetime"))
+                        month_key = payment_date.strftime("%Y-%m")
+                        if month_key not in monthly_data:
+                            monthly_data[month_key] = {"count": 0, "amount": 0}
+                        
+                        # Get amount from payments
+                        if student.get("payments"):
+                            for payment in student["payments"]:
+                                if payment.get("status") == "Paid":
+                                    monthly_data[month_key]["amount"] += payment.get("amount", 0)
+                                    monthly_data[month_key]["count"] += 1
+                                    break
+                        else:
+                            monthly_data[month_key]["amount"] += payment_amount
+                            monthly_data[month_key]["count"] += 1
+                    except:
+                        pass
+            
+            if monthly_data:
+                monthly_df = pd.DataFrame([
+                    {"Month": month, "Payments": data["count"], "Amount": data["amount"]}
+                    for month, data in monthly_data.items()
+                ]).sort_values("Month")
+                
+                st.line_chart(monthly_df.set_index("Month")[["Amount"]])
+                
+                # Show monthly table
+                st.dataframe(monthly_df, use_container_width=True, hide_index=True)
+            
+            # Source analysis
+            st.divider()
+            st.subheader("Submission Source Analysis")
+            
+            admin_added = len([s for s in students if s.get("added_by_admin")])
+            student_submitted = total_students - admin_added
+            
+            source_data = pd.DataFrame({
+                'Source': ['Admin Added', 'Student Submitted'],
+                'Count': [admin_added, student_submitted],
+                'Percentage': [
+                    (admin_added / total_students * 100) if total_students > 0 else 0,
+                    (student_submitted / total_students * 100) if total_students > 0 else 0
+                ]
+            })
+            
+            st.bar_chart(source_data.set_index('Source')[['Count']])
+            st.dataframe(source_data, use_container_width=True, hide_index=True)
+            
+        else:
+            st.info("No student data available")
+    
+    with tab2:
         st.subheader("Export Student Data")
         
         col1, col2 = st.columns(2)
@@ -2100,25 +2356,38 @@ def show_reports():
             if filter_status != "All":
                 filtered_students = [s for s in students if s.get("payment_status") == filter_status]
             
-            # Convert to DataFrame with payment date
-            df = pd.DataFrame([
-                {
-                    "Name": s.get("name"),
-                    "Roll Number": s.get("roll_number"),
-                    "Payment Status": s.get("payment_status"),
-                    "Payment Date": format_datetime(s.get("payment_datetime", "")),
-                    "Timestamp Type": "Auto" if s.get("auto_timestamp") else "Manual",
-                    "Screenshot Status": "Deleted" if s.get("screenshot_deleted") else ("Available" if any(p.get("screenshot") for p in get_student_payments(s.get("id"))) else "Not Available"),
-                    "Payment Account Used": s.get("payment_account_used", ""),
-                    "Admin Remarks": s.get("admin_remarks", ""),
-                    "Student Remarks": s.get("student_remarks", ""),
-                    "Added By": "Admin" if s.get("added_by_admin") else "Student",
-                    "Registration Date": format_datetime(s.get("registration_date", ""))
+            # Convert to DataFrame
+            export_data = []
+            for student in filtered_students:
+                # Get payment info
+                payment_info = {}
+                if student.get("payments") and len(student["payments"]) > 0:
+                    payment = student["payments"][0]
+                    payment_info = {
+                        "Transaction ID": payment.get("transaction_id", ""),
+                        "Payment Amount": payment.get("amount", 0),
+                        "Payment Account": payment.get("payment_account", ""),
+                        "Screenshot": "Yes" if payment.get("screenshot") and not payment.get("screenshot_deleted") else "No"
+                    }
+                
+                student_data = {
+                    "Name": student.get("name"),
+                    "Roll Number": student.get("roll_number"),
+                    "Payment Status": student.get("payment_status"),
+                    "Payment Date": format_datetime(student.get("payment_datetime", "")),
+                    "Timestamp Type": "Auto" if student.get("auto_timestamp") else "Manual",
+                    "Admin Remarks": student.get("admin_remarks", ""),
+                    "Added By": "Admin" if student.get("added_by_admin") else "Student",
+                    "Registration Date": format_datetime(student.get("registration_date", ""))
                 }
-                for s in filtered_students
-            ])
+                
+                # Merge payment info
+                student_data.update(payment_info)
+                export_data.append(student_data)
             
-            if not df.empty:
+            if export_data:
+                df = pd.DataFrame(export_data)
+                
                 if export_format == "CSV":
                     csv = df.to_csv(index=False)
                     st.download_button(
@@ -2146,113 +2415,10 @@ def show_reports():
         else:
             st.info("No student data to export")
     
-    with tab2:
-        st.subheader("Export Payment Data")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            payment_export_format = st.selectbox("Export Format", ["CSV", "Excel"], key="payment_format")
-        with col2:
-            payment_filter = st.selectbox("Filter Payments by Status", ["All", "Paid", "Unpaid", "Pending"], key="payment_filter")
-        
-        if payments:
-            # Filter payments
-            filtered_payments = payments
-            if payment_filter != "All":
-                filtered_payments = [p for p in payments if p.get("status") == payment_filter]
-            
-            # Get student info for each payment
-            payment_data = []
-            for payment in filtered_payments:
-                student = get_student_by_id(payment.get("student_id"))
-                if student:
-                    payment_data.append({
-                        "Student Name": student.get("name"),
-                        "Roll Number": student.get("roll_number"),
-                        "Transaction ID": payment.get("transaction_id"),
-                        "Amount": payment.get("amount"),
-                        "Status": payment.get("status"),
-                        "Payment Date": format_datetime(payment.get("payment_datetime", "")),
-                        "Timestamp Type": "Auto" if payment.get("auto_timestamp") else "Manual",
-                        "Screenshot Status": "Deleted" if payment.get("screenshot_deleted") else ("Available" if payment.get("screenshot") else "Not Available"),
-                        "Form Submission Date": format_datetime(payment.get("submission_date", "")),
-                        "Payment Account": payment.get("payment_account", ""),
-                        "Submitted By": "Admin" if payment.get("added_by_admin") else "Student",
-                        "Admin Remarks": payment.get("admin_remarks", ""),
-                        "Student Remarks": payment.get("student_remarks", "")
-                    })
-            
-            if payment_data:
-                df_payments = pd.DataFrame(payment_data)
-                
-                if payment_export_format == "CSV":
-                    csv = df_payments.to_csv(index=False)
-                    st.download_button(
-                        "Download Payment CSV",
-                        csv,
-                        file_name=f"payments_{payment_filter.lower()}_{datetime.now().strftime('%Y%m%d')}.csv",
-                        mime="text/csv",
-                        use_container_width=True
-                    )
-                else:
-                    output = io.BytesIO()
-                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                        df_payments.to_excel(writer, index=False, sheet_name='Payments')
-                    excel_data = output.getvalue()
-                    
-                    st.download_button(
-                        "Download Payment Excel",
-                        excel_data,
-                        file_name=f"payments_{payment_filter.lower()}_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
-                    )
-            else:
-                st.info("No payment data to export")
-        
-        st.divider()
-        st.subheader("Download Payment Screenshots")
-        
-        screenshot_filter = st.selectbox("Filter by Status", ["All", "Paid", "Unpaid", "Pending"], key="screenshot_filter")
-        
-        if st.button("Download Screenshots as ZIP", use_container_width=True):
-            # Get filtered payments
-            filtered_payments = payments
-            if screenshot_filter != "All":
-                filtered_payments = [p for p in payments if p.get("status") == screenshot_filter]
-            
-            # Filter payments with active screenshots (not deleted)
-            payments_with_screenshots = [p for p in filtered_payments if p.get("screenshot") and not p.get("screenshot_deleted")]
-            
-            if not payments_with_screenshots:
-                st.warning("No active screenshots found for the selected filter")
-            else:
-                # Create ZIP file in memory
-                zip_buffer = io.BytesIO()
-                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                    for payment in payments_with_screenshots:
-                        file_path = UPLOADS_DIR / payment.get("screenshot")
-                        if file_path.exists():
-                            # Get student info for better file naming
-                            student = get_student_by_id(payment.get("student_id"))
-                            if student:
-                                new_name = f"{student.get('roll_number')}_{student.get('name')}_{payment.get('transaction_id')}_{payment.get('screenshot')}"
-                                zip_file.write(file_path, new_name)
-                
-                zip_data = zip_buffer.getvalue()
-                
-                st.download_button(
-                    "Download ZIP",
-                    zip_data,
-                    file_name=f"payment_screenshots_{screenshot_filter.lower()}_{datetime.now().strftime('%Y%m%d')}.zip",
-                    mime="application/zip",
-                    use_container_width=True
-                )
-    
     with tab3:
-        st.subheader("Analytics & Insights")
+        st.subheader("Analytics Dashboard")
         
-        if students and payments:
+        if students:
             # Status distribution
             status_counts = {}
             for student in students:
@@ -2267,67 +2433,143 @@ def show_reports():
                 st.bar_chart(status_df.set_index('Status'))
             
             with col2:
-                st.write("**Submission Source**")
-                admin_added = len([s for s in students if s.get("added_by_admin")])
-                student_submitted = len(students) - admin_added
+                st.write("**Screenshot Analysis**")
                 
-                source_data = pd.DataFrame({
-                    'Source': ['Admin Added', 'Student Submitted'],
-                    'Count': [admin_added, student_submitted]
+                # Calculate screenshot statistics
+                with_screenshot = 0
+                without_screenshot = 0
+                
+                for student in students:
+                    has_screenshot = False
+                    if student.get("payments"):
+                        for payment in student["payments"]:
+                            if payment.get("screenshot") and not payment.get("screenshot_deleted"):
+                                has_screenshot = True
+                                break
+                    
+                    if has_screenshot:
+                        with_screenshot += 1
+                    else:
+                        without_screenshot += 1
+                
+                screenshot_data = pd.DataFrame({
+                    'Category': ['With Screenshot', 'Without Screenshot'],
+                    'Count': [with_screenshot, without_screenshot]
                 })
-                st.bar_chart(source_data.set_index('Source'))
+                st.bar_chart(screenshot_data.set_index('Category'))
             
-            # Payment summary
+            # Real-time analytics
             st.divider()
-            st.subheader("Payment Summary")
+            st.subheader("Real-time Analytics")
             
-            total_amount = sum(p.get("amount", 0) for p in payments if p.get("status") == "Paid")
-            total_paid_count = len([p for p in payments if p.get("status") == "Paid"])
+            # Today's activity
+            today = datetime.now().date()
+            today_students = []
+            for student in students:
+                try:
+                    reg_date = datetime.fromisoformat(student.get("registration_date", "")).date()
+                    if reg_date == today:
+                        today_students.append(student)
+                except:
+                    pass
+            
+            # This week's activity
+            week_ago = today - timedelta(days=7)
+            recent_students = []
+            for student in students:
+                try:
+                    reg_date = datetime.fromisoformat(student.get("registration_date", "")).date()
+                    if reg_date >= week_ago:
+                        recent_students.append(student)
+                except:
+                    pass
             
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("Total Amount Collected", f"PKR{total_amount:,}")
+                st.metric("Today's Registrations", len(today_students))
             with col2:
-                st.metric("Total Paid Transactions", total_paid_count)
+                st.metric("This Week's Registrations", len(recent_students))
             with col3:
-                avg_amount = total_amount / total_paid_count if total_paid_count > 0 else 0
-                st.metric("Average Payment", f"PKR{avg_amount:,.2f}")
+                avg_daily = len(students) / max(1, (datetime.now().date() - datetime.fromisoformat(min(s.get("registration_date") for s in students if s.get("registration_date"))).date()).days)
+                st.metric("Average Daily", f"{avg_daily:.1f}")
             
-            # Screenshot analytics
+            # Performance metrics
             st.divider()
-            st.subheader("Screenshot Analytics")
+            st.subheader("Performance Metrics")
             
-            payments_with_screenshots = len([p for p in payments if p.get("screenshot")])
-            payments_without_screenshots = len(payments) - payments_with_screenshots
-            deleted_screenshots = len([p for p in payments if p.get("screenshot_deleted")])
-            active_screenshots = payments_with_screenshots - deleted_screenshots
+            # Calculate conversion rate (pending to paid)
+            pending_to_paid = 0
+            total_pending = len([s for s in students if s.get("payment_status") == "Pending"])
+            for student in students:
+                if student.get("payment_status") == "Paid":
+                    # Check if was previously pending
+                    if student.get("payments"):
+                        for payment in student["payments"]:
+                            if payment.get("status_history"):
+                                # Check status changes
+                                pass
+                            pending_to_paid += 1
+                            break
             
-            col1, col2, col3 = st.columns(3)
+            conversion_rate = (pending_to_paid / total_pending * 100) if total_pending > 0 else 0
+            
+            col1, col2 = st.columns(2)
             with col1:
-                st.metric("With Screenshots", payments_with_screenshots)
+                st.metric("Pending to Paid Conversion", f"{conversion_rate:.1f}%")
             with col2:
-                st.metric("Without Screenshots", payments_without_screenshots)
-            with col3:
-                st.metric("Deleted Screenshots", deleted_screenshots)
+                # Calculate average processing time
+                processing_times = []
+                for student in students:
+                    if student.get("payment_status") == "Paid" and student.get("payments"):
+                        for payment in student["payments"]:
+                            if payment.get("submission_date") and payment.get("verified_date"):
+                                try:
+                                    submit_date = datetime.fromisoformat(payment.get("submission_date"))
+                                    verify_date = datetime.fromisoformat(payment.get("verified_date"))
+                                    processing_times.append((verify_date - submit_date).total_seconds() / 3600)  # in hours
+                                except:
+                                    pass
+                
+                avg_processing = sum(processing_times) / len(processing_times) if processing_times else 0
+                st.metric("Avg Processing Time", f"{avg_processing:.1f} hours")
             
-            # Recent activity
+            # Data quality metrics
             st.divider()
-            st.subheader("Recent Activity")
+            st.subheader("Data Quality Metrics")
             
-            recent_payments = sorted(payments, key=lambda x: x.get("payment_datetime", x.get("submission_date", "")), reverse=True)[:5]
+            complete_records = 0
+            for student in students:
+                has_name = bool(student.get("name"))
+                has_roll = bool(student.get("roll_number"))
+                has_status = bool(student.get("payment_status"))
+                has_date = bool(student.get("payment_datetime"))
+                
+                if has_name and has_roll and has_status and has_date:
+                    complete_records += 1
             
-            for payment in recent_payments:
-                student = get_student_by_id(payment.get("student_id"))
-                if student:
-                    col1, col2, col3 = st.columns([3, 2, 2])
-                    with col1:
-                        st.write(f"**{student.get('name')}** ({student.get('roll_number')})")
-                    with col2:
-                        st.write(f"PKR{payment.get('amount')} - {payment.get('status')}")
-                    with col3:
-                        payment_date = format_datetime(payment.get("payment_datetime", payment.get("submission_date")))
-                        st.write(f"{payment_date}")
-                    st.divider()
+            data_quality = (complete_records / len(students) * 100) if students else 0
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Complete Records", f"{data_quality:.1f}%")
+            with col2:
+                # Screenshot quality
+                valid_screenshots = 0
+                total_screenshots = 0
+                for student in students:
+                    if student.get("payments"):
+                        for payment in student["payments"]:
+                            if payment.get("screenshot") and not payment.get("screenshot_deleted"):
+                                total_screenshots += 1
+                                # Check if file exists
+                                screenshot_path = UPLOADS_DIR / payment.get("screenshot")
+                                if screenshot_path.exists():
+                                    valid_screenshots += 1
+                
+                screenshot_quality = (valid_screenshots / total_screenshots * 100) if total_screenshots > 0 else 0
+                st.metric("Valid Screenshots", f"{screenshot_quality:.1f}%")
+        else:
+            st.info("No data available for analytics")
 
 def show_admin_settings():
     st.title("⚙️ Admin Settings")
@@ -2340,15 +2582,15 @@ def show_admin_settings():
         st.subheader("Change Username and Password")
         
         with st.form("change_credentials"):
-            current_password = st.text_input("Current Password", type="password")
-            new_username = st.text_input("New Username", value=admin_data.get("username", ""))
-            new_password = st.text_input("New Password", type="password")
-            confirm_password = st.text_input("Confirm New Password", type="password")
+            current_password = st.text_input("Current Password*", type="password")
+            new_username = st.text_input("New Username*", value=admin_data.get("username", ""))
+            new_password = st.text_input("New Password*", type="password")
+            confirm_password = st.text_input("Confirm New Password*", type="password")
             
-            submitted = st.form_submit_button("Update Credentials")
-            
-            if submitted:
-                if not authenticate(admin_data.get("username"), current_password):
+            if st.form_submit_button("💾 Update Credentials"):
+                if not current_password or not new_username or not new_password or not confirm_password:
+                    st.error("Please fill all required fields (*)")
+                elif not authenticate(admin_data.get("username"), current_password):
                     st.error("Current password is incorrect")
                 elif new_password != confirm_password:
                     st.error("New passwords don't match")
@@ -2359,37 +2601,38 @@ def show_admin_settings():
                     admin_data["password"] = hash_password(new_password)
                     update_admin_data(admin_data)
                     st.success("Credentials updated successfully!")
+                    st.rerun()
     
     with tab2:
         st.subheader("System Information")
         
         students = get_students()
-        payments = get_payments()
         contact_info = get_contact_info()
         tab_visibility = get_tab_visibility()
         base_url = get_base_url()
         screenshot_settings = get_screenshot_settings()
+        security_settings = get_security_settings()
         
         col1, col2 = st.columns(2)
         
         with col1:
             st.info(f"Total Students: {len(students)}")
-            st.info(f"Total Payments: {len(payments)}")
-            st.info(f"Payment Amount: PKR{admin_data.get('payment_amount', 5000)}")
+            st.info(f"Payment Amount: PKR {admin_data.get('payment_amount', 5000)}")
             st.info(f"Form Status: {'Published' if is_form_published() else 'Unpublished'}")
             st.info(f"Base URL: {base_url}")
             st.info(f"Student URL Code: {admin_data.get('short_url_code')}")
+            st.info(f"Contact Email: {contact_info['email']}")
+            st.info(f"Contact Phone: {contact_info['phone']}")
         
         with col2:
             st.info(f"Upload Directory: {UPLOADS_DIR}")
             st.info(f"Data Directory: {DATA_DIR}")
             st.info(f"Payment Accounts: {len(get_payment_accounts())}")
-            st.info(f"Contact Email: {contact_info['email']}")
-            st.info(f"Contact Phone: {contact_info['phone']}")
             st.info(f"Admin Added Students: {len([s for s in students if s.get('added_by_admin')])}")
             st.info(f"Auto Timestamps: {len([s for s in students if s.get('auto_timestamp')])}")
             st.info(f"Screenshot Download: {'Enabled' if screenshot_settings.get('allow_download') else 'Disabled'}")
             st.info(f"Screenshot Delete: {'Enabled' if screenshot_settings.get('allow_delete') else 'Disabled'}")
+            st.info(f"Soft Delete: {'Enabled' if security_settings.get('soft_delete_enabled') else 'Disabled'}")
         
         # Tab visibility status
         st.divider()
@@ -2404,18 +2647,14 @@ def show_admin_settings():
         
         st.success(f"Visible tabs for students: {', '.join(visible_tabs) if visible_tabs else 'None'}")
         
-        # Full student URL
+        # Full student URL without copy button
         st.divider()
         st.subheader("Full Student Portal URL")
         st.code(get_short_url())
         
         col1, col2 = st.columns(2)
-        with col1:
-            if st.button("📋 Copy Full URL", use_container_width=True):
-                st.toast("Full URL copied to clipboard!", icon="✅")
         with col2:
-            if st.button("🔗 Test Full URL", use_container_width=True):
-                st.toast(f"Testing: {get_short_url()}", icon="🔗")
+            st.markdown(f'<a href="{get_short_url()}" target="_blank"><button style="background-color: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; width: 100%;">🔗 Open Student Portal</button></a>', unsafe_allow_html=True)
         
         # Data backup
         st.divider()
@@ -2423,9 +2662,8 @@ def show_admin_settings():
         
         if st.button("Export All Data as Backup", use_container_width=True):
             all_data = {
-                "students": get_students(),
+                "students": get_all_students(),  # Include deleted if soft delete enabled
                 "admin": get_admin_data(),
-                "payments": get_payments(),
                 "instructions": get_instructions()
             }
             

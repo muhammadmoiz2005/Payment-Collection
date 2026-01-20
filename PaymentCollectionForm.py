@@ -350,6 +350,27 @@ def save_uploaded_file(uploaded_file, student_id):
     
     return filename
 
+def get_screenshot_download_button(student, payment_index=0):
+    """Helper function to create a download button for student screenshot"""
+    if student.get("payments") and len(student["payments"]) > payment_index:
+        payment = student["payments"][payment_index]
+        if payment.get("screenshot") and not payment.get("screenshot_deleted"):
+            screenshot_path = UPLOADS_DIR / payment.get("screenshot")
+            if screenshot_path.exists():
+                with open(screenshot_path, "rb") as f:
+                    screenshot_bytes = f.read()
+                
+                # Create download button
+                st.download_button(
+                    label="📥 Download Screenshot",
+                    data=screenshot_bytes,
+                    file_name=f"{student.get('roll_number')}_{student.get('name')}_payment.{screenshot_path.suffix}",
+                    mime="image/png",
+                    key=f"dl_{student['id']}_{payment_index}"
+                )
+                return True
+    return False
+
 # Student management with improved structure
 def get_students():
     """Get all active students (filter out soft deleted if enabled)"""
@@ -1071,6 +1092,28 @@ def show_admin_dashboard():
 def show_student_management():
     st.title("👥 Student Management")
     
+    # Add some custom CSS for better button styling
+    st.markdown("""
+    <style>
+    .download-btn {
+        background-color: #4CAF50 !important;
+        color: white !important;
+        border: none !important;
+        padding: 5px 10px !important;
+        border-radius: 4px !important;
+        cursor: pointer !important;
+    }
+    .download-btn:hover {
+        background-color: #45a049 !important;
+    }
+    .screenshot-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
     tab1, tab2, tab3 = st.tabs(["Manage Students", "Add New Student", "Bulk Delete Students"])
     
     with tab1:
@@ -1126,8 +1169,8 @@ def show_student_management():
             
             for student in filtered_students:
                 with st.container():
-                    # Create a single row with columns
-                    col1, col2, col3, col4, col5, col6, col7 = st.columns([3, 2, 2, 2, 2, 2, 2])
+                    # Create a single row with columns - UPDATED: Added col8 for Download
+                    col1, col2, col3, col4, col5, col6, col7, col8 = st.columns([3, 2, 2, 3, 2, 2, 2, 3])
                     
                     with col1:
                         st.write(f"**{student.get('name')}**")
@@ -1141,27 +1184,34 @@ def show_student_management():
                     
                     with col3:
                         if student.get("payment_datetime"):
-                            formatted_date = format_datetime(student.get("payment_datetime"))
+                            formatted_date = format_date_only(student.get("payment_datetime"))
                             st.write(f"**Date:** {formatted_date}")
                     
                     with col4:
-                        # Screenshot View button
+                        # Screenshot View and Download buttons
                         if student.get("payments") and len(student["payments"]) > 0:
                             payment = student["payments"][0]
                             if payment.get("screenshot") and not payment.get("screenshot_deleted"):
-                                if st.button("📸", key=f"view_ss_{student['id']}", help="View Screenshot"):
-                                    screenshot_path = UPLOADS_DIR / payment.get("screenshot")
-                                    if screenshot_path.exists():
+                                screenshot_path = UPLOADS_DIR / payment.get("screenshot")
+                                if screenshot_path.exists():
+                                    # View button
+                                    if st.button("👁️ View", key=f"view_{student['id']}", 
+                                                help="View Screenshot", use_container_width=True):
                                         with open(screenshot_path, "rb") as f:
                                             img_bytes = f.read()
-                                        st.image(img_bytes, caption=f"Screenshot for {student.get('name')}", use_column_width=True)
+                                        st.image(img_bytes, caption=f"Screenshot for {student.get('name')}", 
+                                                use_column_width=True)
+                                else:
+                                    st.write("File missing")
                             else:
                                 st.write("No screenshot")
+                        else:
+                            st.write("No payments")
                     
                     with col5:
                         # Paid button
                         if student.get("payment_status") != "Paid":
-                            if st.button("✅ Paid", key=f"paid_{student['id']}", type="primary"):
+                            if st.button("✅ Paid", key=f"paid_{student['id']}", type="primary", use_container_width=True):
                                 student["payment_status"] = "Paid"
                                 if student.get("payments"):
                                     for payment in student["payments"]:
@@ -1173,7 +1223,7 @@ def show_student_management():
                     with col6:
                         # Unpaid button
                         if student.get("payment_status") != "Unpaid":
-                            if st.button("❌ Unpaid", key=f"unpaid_{student['id']}", type="secondary"):
+                            if st.button("❌ Unpaid", key=f"unpaid_{student['id']}", type="secondary", use_container_width=True):
                                 student["payment_status"] = "Unpaid"
                                 if student.get("payments"):
                                     for payment in student["payments"]:
@@ -1184,10 +1234,30 @@ def show_student_management():
                     
                     with col7:
                         # Delete Student button
-                        if st.button("🗑️ Delete", key=f"delete_{student['id']}", type="secondary"):
+                        if st.button("🗑️ Delete", key=f"delete_{student['id']}", type="secondary", use_container_width=True):
                             if delete_student_by_id(student.get("id")):
                                 st.success(f"Deleted {student.get('name')}")
                                 st.rerun()
+                    
+                    with col8:
+                        # Download Screenshot button
+                        if student.get("payments") and len(student["payments"]) > 0:
+                            payment = student["payments"][0]
+                            if payment.get("screenshot") and not payment.get("screenshot_deleted"):
+                                screenshot_path = UPLOADS_DIR / payment.get("screenshot")
+                                if screenshot_path.exists():
+                                    with open(screenshot_path, "rb") as f:
+                                        screenshot_data = f.read()
+                                    
+                                    # Main Download button with better styling
+                                    st.download_button(
+                                        label="📥 Download Screenshot",
+                                        data=screenshot_data,
+                                        file_name=f"{student.get('roll_number')}_{student.get('name')}_payment.{screenshot_path.suffix}",
+                                        mime="image/png",
+                                        key=f"download_main_{student['id']}",
+                                        use_container_width=True
+                                    )
                     
                     # Admin Controls expandable section
                     with st.expander(f"Admin Controls for {student.get('name')}"):
@@ -1322,7 +1392,7 @@ def show_student_management():
                         
                         if student.get("payments"):
                             for idx, payment in enumerate(student["payments"]):
-                                col_pay1, col_pay2, col_pay3, col_pay4 = st.columns([2, 2, 2, 2])
+                                col_pay1, col_pay2, col_pay3, col_pay4 = st.columns([2, 2, 2, 3])
                                 
                                 with col_pay1:
                                     st.write(f"**Txn ID:** {payment.get('transaction_id')}")
@@ -1343,14 +1413,26 @@ def show_student_management():
                                         else:
                                             screenshot_path = UPLOADS_DIR / payment.get("screenshot")
                                             if screenshot_path.exists():
-                                                col_ss1, col_ss2 = st.columns(2)
+                                                # Create three columns for View, Download, Delete
+                                                col_ss1, col_ss2, col_ss3 = st.columns(3)
                                                 with col_ss1:
-                                                    if st.button("View", key=f"view_payment_{payment['id']}"):
+                                                    if st.button("👁️ View", key=f"view_payment_{payment['id']}", use_container_width=True):
                                                         with open(screenshot_path, "rb") as f:
                                                             img_bytes = f.read()
-                                                        st.image(img_bytes, caption="Payment Screenshot", use_column_width=True)
+                                                        st.image(img_bytes, caption="Payment Screenshot", use_container_width=True)
                                                 with col_ss2:
-                                                    if st.button("Delete", key=f"del_ss_{payment['id']}", type="secondary"):
+                                                    # Download button
+                                                    if st.download_button(
+                                                        "📥 Download",
+                                                        data=open(screenshot_path, "rb").read(),
+                                                        file_name=f"{student.get('roll_number')}_{payment.get('transaction_id')}.{screenshot_path.suffix}",
+                                                        mime="image/png",
+                                                        key=f"download_payment_{payment['id']}",
+                                                        use_container_width=True
+                                                    ):
+                                                        st.success("Download started")
+                                                with col_ss3:
+                                                    if st.button("🗑️ Delete", key=f"del_ss_{payment['id']}", type="secondary", use_container_width=True):
                                                         if delete_screenshot_file(payment.get("screenshot")):
                                                             remove_screenshot_from_student(student["id"], idx)
                                                             st.success("Screenshot deleted")
@@ -2250,7 +2332,7 @@ def show_reports():
             with col3:
                 st.metric("Pending Students", len(pending_students))
             
-            # Payment summary - FIXED
+            # Payment summary
             st.divider()
             st.subheader("Payment Summary")
             
@@ -2344,76 +2426,444 @@ def show_reports():
     with tab2:
         st.subheader("Export Student Data")
         
-        col1, col2 = st.columns(2)
-        with col1:
-            export_format = st.selectbox("Select Format", ["CSV", "Excel"])
-        with col2:
-            filter_status = st.selectbox("Filter by Payment Status", ["All", "Paid", "Unpaid", "Pending"])
+        # Export type selection
+        export_type = st.radio(
+            "Select Export Type",
+            ["Payment Data (CSV/Excel)", "Complete Student Data", "Download All Screenshots"],
+            horizontal=True
+        )
         
-        if students:
-            # Filter students
-            filtered_students = students
-            if filter_status != "All":
-                filtered_students = [s for s in students if s.get("payment_status") == filter_status]
+        if export_type == "Payment Data (CSV/Excel)":
+            col1, col2 = st.columns(2)
+            with col1:
+                export_format = st.selectbox("Select Format", ["CSV", "Excel"])
+            with col2:
+                filter_status = st.selectbox("Filter by Payment Status", ["All", "Paid", "Unpaid", "Pending"])
             
-            # Convert to DataFrame
-            export_data = []
-            for student in filtered_students:
-                # Get payment info
-                payment_info = {}
-                if student.get("payments") and len(student["payments"]) > 0:
-                    payment = student["payments"][0]
-                    payment_info = {
-                        "Transaction ID": payment.get("transaction_id", ""),
-                        "Payment Amount": payment.get("amount", 0),
-                        "Payment Account": payment.get("payment_account", ""),
-                        "Screenshot": "Yes" if payment.get("screenshot") and not payment.get("screenshot_deleted") else "No"
+            if students:
+                # Filter students
+                filtered_students = students
+                if filter_status != "All":
+                    filtered_students = [s for s in students if s.get("payment_status") == filter_status]
+                
+                # Convert to DataFrame with Student Remarks
+                export_data = []
+                for student in filtered_students:
+                    # Get payment info
+                    payment_info = {}
+                    if student.get("payments") and len(student["payments"]) > 0:
+                        payment = student["payments"][0]
+                        payment_info = {
+                            "Transaction ID": payment.get("transaction_id", ""),
+                            "Payment Amount": payment.get("amount", 0),
+                            "Payment Account": payment.get("payment_account", ""),
+                            "Screenshot": "Yes" if payment.get("screenshot") and not payment.get("screenshot_deleted") else "No"
+                        }
+                    
+                    student_data = {
+                        "Name": student.get("name"),
+                        "Roll Number": student.get("roll_number"),
+                        "Payment Status": student.get("payment_status"),
+                        "Payment Date": format_datetime(student.get("payment_datetime", "")),
+                        "Timestamp Type": "Auto" if student.get("auto_timestamp") else "Manual",
+                        "Student Remarks": student.get("student_remarks", ""),  # Added this line
+                        "Admin Remarks": student.get("admin_remarks", ""),
+                        "Added By": "Admin" if student.get("added_by_admin") else "Student",
+                        "Registration Date": format_datetime(student.get("registration_date", ""))
                     }
+                    
+                    # Merge payment info
+                    student_data.update(payment_info)
+                    export_data.append(student_data)
                 
-                student_data = {
-                    "Name": student.get("name"),
-                    "Roll Number": student.get("roll_number"),
-                    "Payment Status": student.get("payment_status"),
-                    "Payment Date": format_datetime(student.get("payment_datetime", "")),
-                    "Timestamp Type": "Auto" if student.get("auto_timestamp") else "Manual",
-                    "Admin Remarks": student.get("admin_remarks", ""),
-                    "Added By": "Admin" if student.get("added_by_admin") else "Student",
-                    "Registration Date": format_datetime(student.get("registration_date", ""))
-                }
-                
-                # Merge payment info
-                student_data.update(payment_info)
-                export_data.append(student_data)
-            
-            if export_data:
-                df = pd.DataFrame(export_data)
-                
-                if export_format == "CSV":
-                    csv = df.to_csv(index=False)
-                    st.download_button(
-                        "Download CSV",
-                        csv,
-                        file_name=f"students_{filter_status.lower()}_{datetime.now().strftime('%Y%m%d')}.csv",
-                        mime="text/csv",
-                        use_container_width=True
-                    )
+                if export_data:
+                    df = pd.DataFrame(export_data)
+                    
+                    if export_format == "CSV":
+                        csv = df.to_csv(index=False)
+                        st.download_button(
+                            "📥 Download CSV",
+                            csv,
+                            file_name=f"student_payments_{filter_status.lower()}_{datetime.now().strftime('%Y%m%d')}.csv",
+                            mime="text/csv",
+                            use_container_width=True
+                        )
+                    else:
+                        output = io.BytesIO()
+                        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                            df.to_excel(writer, index=False, sheet_name='Student Payments')
+                        excel_data = output.getvalue()
+                        
+                        st.download_button(
+                            "📥 Download Excel",
+                            excel_data,
+                            file_name=f"student_payments_{filter_status.lower()}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
+                    
+                    # Show preview
+                    st.subheader("Data Preview")
+                    st.dataframe(df.head(10), use_container_width=True)
+                    
+                    # Show statistics
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Total Records", len(export_data))
+                    with col2:
+                        paid_count = sum(1 for s in filtered_students if s.get("payment_status") == "Paid")
+                        st.metric("Paid Records", paid_count)
+                    with col3:
+                        total_amount = sum(s.get("payments", [{}])[0].get("amount", 0) if s.get("payments") else 0 for s in filtered_students)
+                        st.metric("Total Amount", f"PKR {total_amount:,}")
                 else:
+                    st.info("No data to export for selected filter")
+            else:
+                st.info("No student data to export")
+        
+        elif export_type == "Complete Student Data":
+            st.info("This export includes ALL student information including complete payment history")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                complete_format = st.selectbox("Select Format", ["Excel (Multiple Sheets)", "CSV (Single Sheet)"])
+            with col2:
+                include_deleted = st.checkbox("Include Deleted Students", value=False)
+            
+            if students:
+                # Get all students data
+                all_students = get_all_students() if include_deleted else students
+                
+                if complete_format == "Excel (Multiple Sheets)":
+                    # Create detailed Excel with multiple sheets
                     output = io.BytesIO()
                     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                        df.to_excel(writer, index=False, sheet_name='Students')
+                        # Sheet 1: Student Summary
+                        summary_data = []
+                        for student in all_students:
+                            summary_data.append({
+                                "ID": student.get("id"),
+                                "Name": student.get("name"),
+                                "Roll Number": student.get("roll_number"),
+                                "Payment Status": student.get("payment_status"),
+                                "Payment Date": format_datetime(student.get("payment_datetime", "")),
+                                "Student Remarks": student.get("student_remarks", ""),
+                                "Admin Remarks": student.get("admin_remarks", ""),
+                                "Added By": "Admin" if student.get("added_by_admin") else "Student",
+                                "Registration Date": format_datetime(student.get("registration_date", "")),
+                                "Auto Timestamp": "Yes" if student.get("auto_timestamp") else "No",
+                                "Deleted": "Yes" if student.get("deleted") else "No",
+                                "Deleted Date": format_datetime(student.get("deleted_date", "")) if student.get("deleted_date") else "",
+                                "Payment Count": len(student.get("payments", []))
+                            })
+                        
+                        df_summary = pd.DataFrame(summary_data)
+                        df_summary.to_excel(writer, sheet_name='Student Summary', index=False)
+                        
+                        # Sheet 2: Payment Details
+                        payment_data = []
+                        for student in all_students:
+                            if student.get("payments"):
+                                for payment in student["payments"]:
+                                    payment_data.append({
+                                        "Student ID": student.get("id"),
+                                        "Student Name": student.get("name"),
+                                        "Roll Number": student.get("roll_number"),
+                                        "Payment ID": payment.get("id"),
+                                        "Transaction ID": payment.get("transaction_id"),
+                                        "Amount": payment.get("amount"),
+                                        "Status": payment.get("status"),
+                                        "Payment Account": payment.get("payment_account"),
+                                        "Payment Date": format_datetime(payment.get("payment_datetime", "")),
+                                        "Submission Date": format_datetime(payment.get("submission_date", "")),
+                                        "Student Remarks": payment.get("student_remarks", ""),
+                                        "Admin Remarks": payment.get("admin_remarks", ""),
+                                        "Screenshot": payment.get("screenshot"),
+                                        "Screenshot Deleted": "Yes" if payment.get("screenshot_deleted") else "No",
+                                        "Added By Admin": "Yes" if payment.get("added_by_admin") else "No",
+                                        "Auto Timestamp": "Yes" if payment.get("auto_timestamp") else "No",
+                                        "Verified By Admin": "Yes" if payment.get("verified_by_admin") else "No"
+                                    })
+                        
+                        if payment_data:
+                            df_payments = pd.DataFrame(payment_data)
+                            df_payments.to_excel(writer, sheet_name='Payment Details', index=False)
+                        
+                        # Sheet 3: Student-Payment Bridge (One row per student-payment)
+                        bridge_data = []
+                        for student in all_students:
+                            if student.get("payments"):
+                                for payment in student["payments"]:
+                                    bridge_record = {
+                                        "Student ID": student.get("id"),
+                                        "Name": student.get("name"),
+                                        "Roll Number": student.get("roll_number"),
+                                        "Payment Status": student.get("payment_status"),
+                                        "Student Remarks": student.get("student_remarks", ""),
+                                        "Admin Remarks": student.get("admin_remarks", ""),
+                                        "Added By": "Admin" if student.get("added_by_admin") else "Student",
+                                        "Registration Date": format_datetime(student.get("registration_date", "")),
+                                        "Payment ID": payment.get("id"),
+                                        "Transaction ID": payment.get("transaction_id"),
+                                        "Amount": payment.get("amount"),
+                                        "Payment Status Detail": payment.get("status"),
+                                        "Payment Account": payment.get("payment_account"),
+                                        "Payment Date": format_datetime(payment.get("payment_datetime", "")),
+                                        "Screenshot": "Yes" if payment.get("screenshot") and not payment.get("screenshot_deleted") else "No",
+                                        "Auto Timestamp": "Yes" if payment.get("auto_timestamp") else "No"
+                                    }
+                                    bridge_data.append(bridge_record)
+                            else:
+                                # Student without payments
+                                bridge_record = {
+                                    "Student ID": student.get("id"),
+                                    "Name": student.get("name"),
+                                    "Roll Number": student.get("roll_number"),
+                                    "Payment Status": student.get("payment_status"),
+                                    "Student Remarks": student.get("student_remarks", ""),
+                                    "Admin Remarks": student.get("admin_remarks", ""),
+                                    "Added By": "Admin" if student.get("added_by_admin") else "Student",
+                                    "Registration Date": format_datetime(student.get("registration_date", "")),
+                                    "Payment ID": "",
+                                    "Transaction ID": "",
+                                    "Amount": "",
+                                    "Payment Status Detail": "",
+                                    "Payment Account": "",
+                                    "Payment Date": "",
+                                    "Screenshot": "",
+                                    "Auto Timestamp": ""
+                                }
+                                bridge_data.append(bridge_record)
+                        
+                        df_bridge = pd.DataFrame(bridge_data)
+                        df_bridge.to_excel(writer, sheet_name='Student-Payment Bridge', index=False)
+                        
+                        # Sheet 4: Statistics
+                        stats_data = {
+                            "Metric": ["Total Students", "Active Students", "Deleted Students", 
+                                      "Paid Students", "Unpaid Students", "Pending Students",
+                                      "Admin Added", "Student Added", "With Screenshots",
+                                      "Total Payments", "Total Amount Collected"],
+                            "Count": [
+                                len(all_students),
+                                len([s for s in all_students if not s.get("deleted", False)]),
+                                len([s for s in all_students if s.get("deleted", False)]),
+                                len([s for s in all_students if s.get("payment_status") == "Paid"]),
+                                len([s for s in all_students if s.get("payment_status") == "Unpaid"]),
+                                len([s for s in all_students if s.get("payment_status") == "Pending"]),
+                                len([s for s in all_students if s.get("added_by_admin")]),
+                                len([s for s in all_students if not s.get("added_by_admin")]),
+                                len([s for s in all_students if any(p.get("screenshot") and not p.get("screenshot_deleted") 
+                                                                  for p in s.get("payments", []))]),
+                                sum(len(s.get("payments", [])) for s in all_students),
+                                sum(p.get("amount", 0) for s in all_students for p in s.get("payments", []) if p.get("status") == "Paid")
+                            ]
+                        }
+                        
+                        df_stats = pd.DataFrame(stats_data)
+                        df_stats.to_excel(writer, sheet_name='Statistics', index=False)
+                    
                     excel_data = output.getvalue()
                     
                     st.download_button(
-                        "Download Excel",
+                        "📥 Download Complete Data (Excel)",
                         excel_data,
-                        file_name=f"students_{filter_status.lower()}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        file_name=f"complete_student_data_{datetime.now().strftime('%Y%m%d')}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         use_container_width=True
                     )
+                
+                elif complete_format == "CSV (Single Sheet)":
+                    # Create flattened CSV with all data in one sheet
+                    flattened_data = []
+                    
+                    for student in all_students:
+                        # Get all payments for this student
+                        payments = student.get("payments", [])
+                        
+                        if payments:
+                            # Create one row per payment
+                            for payment in payments:
+                                record = {
+                                    "Student ID": student.get("id"),
+                                    "Name": student.get("name"),
+                                    "Roll Number": student.get("roll_number"),
+                                    "Student Payment Status": student.get("payment_status"),
+                                    "Student Remarks": student.get("student_remarks", ""),
+                                    "Admin Remarks": student.get("admin_remarks", ""),
+                                    "Added By": "Admin" if student.get("added_by_admin") else "Student",
+                                    "Registration Date": format_datetime(student.get("registration_date", "")),
+                                    "Auto Timestamp": "Yes" if student.get("auto_timestamp") else "No",
+                                    "Deleted": "Yes" if student.get("deleted") else "No",
+                                    "Deleted Date": format_datetime(student.get("deleted_date", "")) if student.get("deleted_date") else "",
+                                    
+                                    # Payment Details
+                                    "Payment ID": payment.get("id"),
+                                    "Transaction ID": payment.get("transaction_id"),
+                                    "Payment Amount": payment.get("amount"),
+                                    "Payment Status": payment.get("status"),
+                                    "Payment Account": payment.get("payment_account"),
+                                    "Payment Date": format_datetime(payment.get("payment_datetime", "")),
+                                    "Payment Submission Date": format_datetime(payment.get("submission_date", "")),
+                                    "Payment Student Remarks": payment.get("student_remarks", ""),
+                                    "Payment Admin Remarks": payment.get("admin_remarks", ""),
+                                    "Screenshot File": payment.get("screenshot"),
+                                    "Screenshot Deleted": "Yes" if payment.get("screenshot_deleted") else "No",
+                                    "Payment Added By Admin": "Yes" if payment.get("added_by_admin") else "No",
+                                    "Payment Auto Timestamp": "Yes" if payment.get("auto_timestamp") else "No",
+                                    "Payment Verified": "Yes" if payment.get("verified_by_admin") else "No"
+                                }
+                                flattened_data.append(record)
+                        else:
+                            # Student without payments
+                            record = {
+                                "Student ID": student.get("id"),
+                                "Name": student.get("name"),
+                                "Roll Number": student.get("roll_number"),
+                                "Student Payment Status": student.get("payment_status"),
+                                "Student Remarks": student.get("student_remarks", ""),
+                                "Admin Remarks": student.get("admin_remarks", ""),
+                                "Added By": "Admin" if student.get("added_by_admin") else "Student",
+                                "Registration Date": format_datetime(student.get("registration_date", "")),
+                                "Auto Timestamp": "Yes" if student.get("auto_timestamp") else "No",
+                                "Deleted": "Yes" if student.get("deleted") else "No",
+                                "Deleted Date": format_datetime(student.get("deleted_date", "")) if student.get("deleted_date") else "",
+                                
+                                # Empty payment fields
+                                "Payment ID": "",
+                                "Transaction ID": "",
+                                "Payment Amount": "",
+                                "Payment Status": "",
+                                "Payment Account": "",
+                                "Payment Date": "",
+                                "Payment Submission Date": "",
+                                "Payment Student Remarks": "",
+                                "Payment Admin Remarks": "",
+                                "Screenshot File": "",
+                                "Screenshot Deleted": "",
+                                "Payment Added By Admin": "",
+                                "Payment Auto Timestamp": "",
+                                "Payment Verified": ""
+                            }
+                            flattened_data.append(record)
+                    
+                    if flattened_data:
+                        df_flat = pd.DataFrame(flattened_data)
+                        csv_data = df_flat.to_csv(index=False)
+                        
+                        st.download_button(
+                            "📥 Download Complete Data (CSV)",
+                            csv_data,
+                            file_name=f"complete_student_data_{datetime.now().strftime('%Y%m%d')}.csv",
+                            mime="text/csv",
+                            use_container_width=True
+                        )
+                        
+                        # Show preview
+                        st.subheader("Data Preview (First 10 rows)")
+                        st.dataframe(df_flat.head(10), use_container_width=True)
+                        
+                        # Show statistics
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Total Students", len(all_students))
+                        with col2:
+                            st.metric("Total Records", len(flattened_data))
+                        with col3:
+                            total_payments = sum(len(s.get("payments", [])) for s in all_students)
+                            st.metric("Total Payments", total_payments)
+                    else:
+                        st.info("No data to export")
+                
+                # Show data preview for all formats
+                st.divider()
+                st.subheader("Data Preview")
+                if all_students:
+                    preview_df = pd.DataFrame([
+                        {
+                            "Name": s.get("name"),
+                            "Roll": s.get("roll_number"),
+                            "Status": s.get("payment_status"),
+                            "Student Remarks": s.get("student_remarks", ""),
+                            "Admin Remarks": s.get("admin_remarks", ""),
+                            "Payments": len(s.get("payments", []))
+                        } 
+                        for s in all_students[:10]
+                    ])
+                    st.dataframe(preview_df, use_container_width=True)
+                    if len(all_students) > 10:
+                        st.caption(f"Showing 10 of {len(all_students)} students")
             else:
-                st.info("No data to export for selected filter")
-        else:
-            st.info("No student data to export")
+                st.info("No student data to export")
+        
+        else:  # Download All Screenshots
+            st.subheader("Download All Screenshots as ZIP")
+            st.warning("⚠️ This may take some time depending on the number of screenshots.")
+            
+            # Get all active screenshots
+            all_screenshots = []
+            for student in students:
+                if student.get("payments"):
+                    for payment in student["payments"]:
+                        if payment.get("screenshot") and not payment.get("screenshot_deleted"):
+                            screenshot_path = UPLOADS_DIR / payment.get("screenshot")
+                            if screenshot_path.exists():
+                                all_screenshots.append({
+                                    "path": screenshot_path,
+                                    "filename": payment.get("screenshot"),
+                                    "student_name": student.get("name"),
+                                    "roll_number": student.get("roll_number"),
+                                    "transaction_id": payment.get("transaction_id")
+                                })
+            
+            if all_screenshots:
+                st.success(f"Found {len(all_screenshots)} screenshots available for download")
+                
+                # Show screenshot statistics
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Screenshots", len(all_screenshots))
+                with col2:
+                    total_size_mb = sum(s["path"].stat().st_size for s in all_screenshots) / (1024 * 1024)
+                    st.metric("Total Size", f"{total_size_mb:.2f} MB")
+                with col3:
+                    unique_students = len(set(s["roll_number"] for s in all_screenshots))
+                    st.metric("Unique Students", unique_students)
+                
+                # Show sample list
+                with st.expander("View Screenshot List"):
+                    for i, ss in enumerate(all_screenshots[:20]):
+                        col1, col2, col3 = st.columns([1, 3, 3])
+                        col1.write(f"{i+1}.")
+                        col2.write(f"📸 {ss['student_name']}")
+                        col3.write(f"Roll: {ss['roll_number']}")
+                    
+                    if len(all_screenshots) > 20:
+                        st.info(f"... and {len(all_screenshots) - 20} more screenshots")
+                
+                # Create ZIP file
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                    for ss in all_screenshots:
+                        # Create meaningful filename
+                        safe_name = ss['student_name'].replace(' ', '_').replace('/', '_')
+                        safe_roll = ss['roll_number'].replace(' ', '_').replace('/', '_')
+                        file_ext = ss['filename'].split('.')[-1]
+                        new_filename = f"{safe_roll}_{safe_name}_{ss['transaction_id']}.{file_ext}"
+                        
+                        # Add file to zip
+                        zip_file.write(ss['path'], new_filename)
+                
+                # Download button
+                st.download_button(
+                    "📦 Download All Screenshots as ZIP",
+                    zip_buffer.getvalue(),
+                    file_name=f"student_screenshots_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
+                    mime="application/zip",
+                    use_container_width=True
+                )
+            else:
+                st.info("No screenshots found to download")
     
     with tab3:
         st.subheader("Analytics Dashboard")
